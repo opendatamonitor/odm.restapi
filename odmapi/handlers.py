@@ -13,9 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import division
 from bson.son import SON
 from pymongo import Connection, ASCENDING, DESCENDING
-from pymongo.errors import ConnectionFailure, ConfigurationError, OperationFailure, AutoReconnect
+from pymongo.errors import ConnectionFailure, ConfigurationError, OperationFailure, AutoReconnect,PyMongoError
 from bson import json_util
 
 import re
@@ -24,12 +25,14 @@ import sys
 import difflib
 import bisect
 import numpy
-from datetime import datetime,timedelta,date
+from datetime import datetime,timedelta,date,time
 from dateutil.relativedelta import relativedelta
 from collections import defaultdict,OrderedDict
 import time
+import operator
 # import pytz
 # from operator import itemgetter
+from scipy.stats.stats import pearsonr
 
 
 #all_functions = inspect.getmembers(module, inspect.isfunction)
@@ -40,18 +43,21 @@ try:
 except ImportError:
     import simplejson as json
 
-def get_db():
-    return 'odm_harmonized'
-
-
 class MongoHandler:
     mh = None
     _cursor_id = 0
+    db_name = 'odm'
+    collection_name = 'odm_harmonised'
+    # collection_name = 'odm_harmonised_demo'
+    jobs_collection_name = 'jobs'
+    # jobs_collection_name = 'jobs_demo'
+
+    batchSize=10000
 
     def __init__(self, mongos):
-        self.db_name = 'odm'
-        self.collection_name = 'odm_harmonised'
-        self.job_collection_name = 'jobs'
+        self.db_name = MongoHandler.db_name
+        self.collection_name = MongoHandler.collection_name
+        self.job_collection_name = MongoHandler.jobs_collection_name
 
         self.connections = {}
         self.countryStats={}
@@ -68,30 +74,54 @@ class MongoHandler:
 
             self._connect(args, out.ostream, name = name)
 
-        self._collect_country_stats('default')
+        self.__collect_country_stats('default')
 
-    def _collect_country_stats(self,name):
+
+    def _set_collection(self,name):
+        # print('from handler...yolo')
+        self.collection_name = name
+
+
+    def _reset_collection(self,name):
+        self.collection_name = MongoHandler.collection_name
+
+
+    def __date_handler(self, obj):
+        return obj.isoformat() if hasattr(obj, 'isoformat') else obj
+
+
+    def __collect_country_stats(self,name):
         conn = self._get_connection(name)
         if conn == None:
             out('{"ok" : 0, "errmsg" : "couldn\'t get connection to mongo"}')
             return
 
-        results=conn[self.db_name]['countries'].find(spec={'odm':{'$exists':True}},fields={'ISO':1,'Country':1,'Population':1,'odm':1})
+        results=conn[self.db_name]['countries'].find(spec={'odm':{'$exists':True}},
+                fields={'ISO':1,'Country':1,'Population':1,'odm':1})
 
         for result in results:
             stats={}
-            stats['population']=int(result['odm']['population']) \
-                    if 'population' in result['odm'].keys() \
-                    else int(result['Population'])
-            try:
-                stats['GDP']=int(result['odm']['GDP']) if 'GDP' in result['odm'].keys() else 0
-            except ValueError as e:
-                stats['GDP']=0
-            try:
-                stats['HDI']=int(result['odm']['HDI']) if 'HDI' in result['odm'].keys() else 0
-            except ValueError as e:
-                stats['HDI']=0
-            self.countryStats[result['ISO']]=stats
+            if 'odm' in result.keys():
+                if 'population' in result['odm'].keys():
+                    stats['population']={}
+                    for date in result['odm']['population']:
+                        stats['population'][date]=result['odm']['population'][date]
+                if 'GDP' in result['odm'].keys():
+                    stats['GDP']={}
+                    for date in result['odm']['GDP']:
+                        try:
+                            stats['GDP'][date]=result['odm']['GDP'][date]
+                        except ValueError as e:
+                            stats['GDP'][date]=-1
+                if 'HDI' in result['odm'].keys():
+                    stats['HDI']={}
+                    for date in result['odm']['HDI']:
+                        pass
+                        try:
+                            stats['HDI'][date]=result['odm']['HDI'][date]
+                        except ValueError as e:
+                            stats['HDI'][date]=-1
+                self.countryStats[result['ISO']]=stats
 
 
     def _get_connection(self, name = None, uri='mongodb://localhost:27017'):
@@ -182,13 +212,13 @@ class MongoHandler:
 
         out(json.dumps(result, default=json_util.default))
 
-    def _hello(self, args, out, name = None, db = None, collection = None):
+    def _hello(self, args, out, name = None, version = None, db = None, collection = None):
         out('{"ok" : 1, "msg" : "Uh, we had a slight weapons malfunction, but ' +
             'uh... everything\'s perfectly all right now. We\'re fine. We\'re ' +
             'all fine here now, thank you. How are you?"}')
         return
 
-    def _status(self, args, out, name = None, db = None, collection = None):
+    def _status(self, args, out, name = None, version = None, db = None, collection = None):
         result = {"ok" : 1, "connections" : {}}
 
         for name, conn in self.connections.iteritems():
@@ -258,6 +288,8 @@ class MongoHandler:
         """
         query the database.
         """
+        db = self.db_name
+        collection = self.collection_name
 
         if type(args).__name__ != 'dict':
             out('{"ok" : 0, "errmsg" : "_find must be a GET request"}')
@@ -268,11 +300,9 @@ class MongoHandler:
             out('{"ok" : 0, "errmsg" : "couldn\'t get connection to mongo"}')
             return
 
-        #if db == None or collection == None:
-        #    out('{"ok" : 0, "errmsg" : "db and collection must be defined"}')
-        #    return
-        db=self.db_name
-        collection=self.collection_name
+        if db == None or collection == None:
+           out('{"ok" : 0, "errmsg" : "db and collection must be defined"}')
+           return
 
         criteria = {}
         if 'criteria' in args:
@@ -299,7 +329,8 @@ class MongoHandler:
                 'resources.size':True, 'resources.format':True,
                 'owner_org':True,
                 'ckan_url':True,'url':True,
-                'isopen':True,'private':True
+                'isopen':True,'private':True,
+                'is_duplicate':True,
                 }
         # if 'fields' in args:
         #     fields = self._get_son(args['fields'][0], out)
@@ -504,7 +535,7 @@ class MongoHandler:
             sorted_batch['author']=i['author'] if 'author' in i.keys() else ''
             sorted_batch['author_email']=i['author_email'] if 'author_email' in i.keys() else ''
             sorted_batch['license_id']=i['license_id'] if 'license_id' in i.keys() else ''
-            sorted_batch['dataset_url']=i['ckan_url'] if 'ckan_url' in i.keys() and i['ckan_url']!=None else i['url']
+            sorted_batch['dataset_url']=i['ckan_url'] if 'ckan_url' in i.keys() and i['ckan_url']!=None else (i['url'] if 'url' in i else '')
             sorted_batch['catalogue_url']=i['catalogue_url'] if 'catalogue_url' in i.keys() else ''
             sorted_batch['metadata_created']=i['metadata_created'] if 'metadata_created' in i.keys() else ''
             sorted_batch['metadata_modified']=i['metadata_modified'] if 'metadata_modified' in i.keys() else ''
@@ -530,19 +561,16 @@ class MongoHandler:
             sorted_batch['platform']=i['platform'] if 'platform' in i.keys() else ''
             sorted_batch['language']=i['language'] if 'language' in i.keys() else ''
             sorted_batch['isopen']=i['isopen'] if 'isopen' in i.keys() else True
+            sorted_batch['is_duplicate']=i['is_duplicate'] if 'is_duplicate' in i.keys() else False
             # sorted_batch['version']=i['version'] if 'version' in i.keys() else ''
 
             list_batch.append(sorted_batch)
 
         # out(json.dumps({"results" : list_batch, "id" : cursor.id, "ok" : 1}, default=json_util.default))
         if count:
-            out(json.dumps({"count": count, "results" : list_batch, "id" : cursor.id, "ok" : 1}, default=self.date_handler))
+            out(json.dumps({"count": count, "results" : list_batch, "id" : cursor.id, "ok" : 1}, default=self.__date_handler))
         else:
-            out(json.dumps({"results" : list_batch, "id" : cursor.id, "ok" : 1}, default=self.date_handler))
-
-
-    def date_handler(self, obj):
-        return obj.isoformat() if hasattr(obj, 'isoformat') else obj
+            out(json.dumps({"results" : list_batch, "id" : cursor.id, "ok" : 1}, default=self.__date_handler))
 
 
     def _insert(self, args, out, name = None, db = None, collection = None):
@@ -739,6 +767,21 @@ class MongoHandler:
         out(json.dumps(result, default=json_util.default))
 
 
+    ##returns total number of catalogues
+    def _totaldistribsfreq(self, args, out, name = None, version = None, db = None, collection = None):
+        if type(args).__name__ != 'dict':
+            return {"ok" : 0, "errmsg" : "_agregate must be a GET request"}
+
+        conn = self._get_connection(name)
+        if conn == None:
+            return {"ok" : 0, "errmsg" : "couldn\'t get connection to mongo"}
+
+        metric = Metrics()
+        result = metric.GetTotalDistribsFreq(conn, args, version, self.db_name, self.collection_name)
+
+        out(json.dumps(result, default=json_util.default))
+
+
     ##returns frequency of catalogues using specific software platforms
     def _catsoftfreq(self, args, out, name = None, version = None, db = None, collection = None):
         if type(args).__name__ != 'dict':
@@ -784,6 +827,51 @@ class MongoHandler:
         out(json.dumps(result, default=json_util.default))
 
 
+    ## returns the number of catalogued datasets
+    def _catdatasetstotfreq(self, args, out, name = None, version = None, db = None, collection = None):
+        if type(args).__name__ != 'dict':
+            return {"ok" : 0, "errmsg" : "_agregate must be a GET request"}
+
+        conn = self._get_connection(name)
+        if conn == None:
+            return {"ok" : 0, "errmsg" : "couldn\'t get connection to mongo"}
+
+        metric = Metrics()
+        result = metric.GetDatasetsTotFreq(conn, args, version, self.db_name, self.collection_name)
+
+        out(json.dumps(result, default=json_util.default))
+
+
+    ## returns the number of catalogued datasets
+    def _cddatasetsfreq(self, args, out, name = None, version = None, db = None, collection = None):
+        if type(args).__name__ != 'dict':
+            return {"ok" : 0, "errmsg" : "_agregate must be a GET request"}
+
+        conn = self._get_connection(name)
+        if conn == None:
+            return {"ok" : 0, "errmsg" : "couldn\'t get connection to mongo"}
+
+        metric = Metrics()
+        result = metric.GetCDDatasetsFreq(conn, args, version, self.db_name, self.collection_name)
+
+        out(json.dumps(result, default=json_util.default))
+
+
+    ## returns the number of catalogued datasets
+    def _catdatasets(self, args, out, name = None, version = None, db = None, collection = None):
+        if type(args).__name__ != 'dict':
+            return {"ok" : 0, "errmsg" : "_agregate must be a GET request"}
+
+        conn = self._get_connection(name)
+        if conn == None:
+            return {"ok" : 0, "errmsg" : "couldn\'t get connection to mongo"}
+
+        metric = Metrics()
+        result = metric.GetDatasets(conn, args, version, self.db_name, self.collection_name)
+
+        out(json.dumps(result, default=json_util.default))
+
+
     ## returns the number of unique organisations publishing data (publishers)
     def _catpublishersfreq(self, args, out, name = None, version = None, db = None, collection = None):
         if type(args).__name__ != 'dict':
@@ -799,7 +887,22 @@ class MongoHandler:
         out(json.dumps(result, default=json_util.default))
 
 
-    ##returns number of datasets with an explicity set license
+    ## returns the number of unique organisations publishing data (publishers)
+    def _cdpublishersfreq(self, args, out, name = None, version = None, db = None, collection = None):
+        if type(args).__name__ != 'dict':
+            return {"ok" : 0, "errmsg" : "_agregate must be a GET request"}
+
+        conn = self._get_connection(name)
+        if conn == None:
+            return {"ok" : 0, "errmsg" : "couldn\'t get connection to mongo"}
+
+        metric = Metrics()
+        result = metric.GetCDPublishersFreq(conn, args, version, self.db_name, self.collection_name)
+
+        out(json.dumps(result, default=json_util.default))
+
+
+    ##returns number of distributions with an explicity set license
     def _catlicensedfreq(self, args, out, name = None, version = None, db = None, collection = None):
         if type(args).__name__ != 'dict':
             return {"ok" : 0, "errmsg" : "_agregate must be a GET request"}
@@ -814,7 +917,7 @@ class MongoHandler:
         out(json.dumps(result, default=json_util.default))
 
 
-    ##returns proportion of datasets with an explicity set license
+    ##returns proportion of distributions with an explicity set license
     def _catlicensedprop(self, args, out, name = None, version = None, db = None, collection = None):
         if type(args).__name__ != 'dict':
             return {"ok" : 0, "errmsg" : "_agregate must be a GET request"}
@@ -845,6 +948,34 @@ class MongoHandler:
         out(json.dumps(result, default=json_util.default))
 
 
+    def _edopenlicfreq(self, args, out, name = None, version = None, db = None, collection = None):
+        if type(args).__name__ != 'dict':
+            return {"ok" : 0, "errmsg" : "_agregate must be a GET request"}
+
+        conn = self._get_connection(name)
+        if conn == None:
+            return {"ok" : 0, "errmsg" : "couldn\'t get connection to mongo"}
+
+        metric = Metrics()
+        result = metric.GetEDOpenLicenseFreq(conn, args, version, self.db_name, self.collection_name)
+
+        out(json.dumps(result, default=json_util.default))
+
+
+    def _cdopenlicfreq(self, args, out, name = None, version = None, db = None, collection = None):
+        if type(args).__name__ != 'dict':
+            return {"ok" : 0, "errmsg" : "_agregate must be a GET request"}
+
+        conn = self._get_connection(name)
+        if conn == None:
+            return {"ok" : 0, "errmsg" : "couldn\'t get connection to mongo"}
+
+        metric = Metrics()
+        result = metric.GetCDOpenLicenseFreq(conn, args, version, self.db_name, self.collection_name)
+
+        out(json.dumps(result, default=json_util.default))
+
+
     ## returns the proportion of datasets with Open License (list from http://opendefinition.org/licenses)
     def _catopenlicprop(self, args, out, name = None, version = None, db = None, collection = None):
         if type(args).__name__ != 'dict':
@@ -856,6 +987,22 @@ class MongoHandler:
 
         metric = Metrics()
         result = metric.GetProportionOfDatasetsWithOpenLicense(conn, args, version, self.db_name, self.collection_name)
+
+        out(json.dumps(result, default=json_util.default))
+
+
+    ## returns the number of datasets with Open License
+    ## (list from http://opendefinition.org/licenses)
+    def _openlicdatefreq(self, args, out, name = None, version = None, db = None, collection = None):
+        if type(args).__name__ != 'dict':
+            return {"ok" : 0, "errmsg" : "_agregate must be a GET request"}
+
+        conn = self._get_connection(name)
+        if conn == None:
+            return {"ok" : 0, "errmsg" : "couldn\'t get connection to mongo"}
+
+        metric = Metrics()
+        result = metric.GetOpenLicenseFreqPerDate(conn, args, version, self.db_name, self.collection_name)
 
         out(json.dumps(result, default=json_util.default))
 
@@ -935,6 +1082,34 @@ class MongoHandler:
         out(json.dumps(result, default=json_util.default))
 
 
+    def _ednonproprformatfreq(self, args, out, name = None, version = None, db = None, collection = None):
+        if type(args).__name__ != 'dict':
+            return {"ok" : 0, "errmsg" : "_agregate must be a GET request"}
+
+        conn = self._get_connection(name)
+        if conn == None:
+            return {"ok" : 0, "errmsg" : "couldn\'t get connection to mongo"}
+
+        metric = Metrics()
+        result=metric.GetEDNonProprietaryFormatFreq(conn, args, version, self.db_name, self.collection_name)
+
+        out(json.dumps(result, default=json_util.default))
+
+
+    def _catnonproprformatfreq(self, args, out, name = None, version = None, db = None, collection = None):
+        if type(args).__name__ != 'dict':
+            return {"ok" : 0, "errmsg" : "_agregate must be a GET request"}
+
+        conn = self._get_connection(name)
+        if conn == None:
+            return {"ok" : 0, "errmsg" : "couldn\'t get connection to mongo"}
+
+        metric = Metrics()
+        result=metric.GetCatNonProprietaryFormatFreq(conn, args, version, self.db_name, self.collection_name)
+
+        out(json.dumps(result, default=json_util.default))
+
+
     ##Get Proportion of datasets by file format
     def _catfileformatprop(self, args, out, name = None, version = None, db = None, collection = None):
         if type(args).__name__ != 'dict':
@@ -948,7 +1123,6 @@ class MongoHandler:
         result=metric.GetProportionOfDatasetsByFileFormat(conn, args, version, self.db_name, self.collection_name)
 
         out(json.dumps(result, default=json_util.default))
-
 
 
     ##Get all catalogue urls
@@ -1025,6 +1199,48 @@ class MongoHandler:
 
         out(json.dumps(result, default=json_util.default))
 
+    ##Frequency of catalogued distributions
+    def _catdistribstotfreq(self, args, out, name = None, version = None, db = None, collection = None):
+        if type(args).__name__ != 'dict':
+            return {"ok" : 0, "errmsg" : "_agregate must be a GET request"}
+
+        conn = self._get_connection(name)
+        if conn == None:
+            return {"ok" : 0, "errmsg" : "couldn\'t get connection to mongo"}
+
+        metric = Metrics()
+        result=metric.GetCatDistribsTotFreq(conn, args, version, self.db_name, self.collection_name)
+
+        out(json.dumps(result, default=json_util.default))
+
+    ##Frequency of catalogued distributions
+    def _cddistribsfreq(self, args, out, name = None, version = None, db = None, collection = None):
+        if type(args).__name__ != 'dict':
+            return {"ok" : 0, "errmsg" : "_agregate must be a GET request"}
+
+        conn = self._get_connection(name)
+        if conn == None:
+            return {"ok" : 0, "errmsg" : "couldn\'t get connection to mongo"}
+
+        metric = Metrics()
+        result=metric.GetCDDistribsFreq(conn, args, version, self.db_name, self.collection_name)
+
+        out(json.dumps(result, default=json_util.default))
+
+    ##Frequency of catalogued distributions
+    def _catdistribs(self, args, out, name = None, version = None, db = None, collection = None):
+        if type(args).__name__ != 'dict':
+            return {"ok" : 0, "errmsg" : "_agregate must be a GET request"}
+
+        conn = self._get_connection(name)
+        if conn == None:
+            return {"ok" : 0, "errmsg" : "couldn\'t get connection to mongo"}
+
+        metric = Metrics()
+        result=metric.GetCatDistribs(conn, args, version, self.db_name, self.collection_name)
+
+        out(json.dumps(result, default=json_util.default))
+
     ##Total distribution size in a catalogue
     def _catdatasizetotal(self, args, out, name = None, version = None, db = None, collection = None):
         if type(args).__name__ != 'dict':
@@ -1036,6 +1252,36 @@ class MongoHandler:
 
         metric = Metrics()
         result=metric.GetCatDataSizeTotal(conn, args, version, self.db_name, self.collection_name)
+
+        out(json.dumps(result, default=json_util.default))
+
+
+    ##Total distribution size in a catalogue
+    def _eddistribsize(self, args, out, name = None, version = None, db = None, collection = None):
+        if type(args).__name__ != 'dict':
+            return {"ok" : 0, "errmsg" : "_agregate must be a GET request"}
+
+        conn = self._get_connection(name)
+        if conn == None:
+            return {"ok" : 0, "errmsg" : "couldn\'t get connection to mongo"}
+
+        metric = Metrics()
+        result=metric.GetEDDistribSize(conn, args, version, self.db_name, self.collection_name)
+
+        out(json.dumps(result, default=json_util.default))
+
+
+    ##Total distribution size in a catalogue
+    def _cddistribsize(self, args, out, name = None, version = None, db = None, collection = None):
+        if type(args).__name__ != 'dict':
+            return {"ok" : 0, "errmsg" : "_agregate must be a GET request"}
+
+        conn = self._get_connection(name)
+        if conn == None:
+            return {"ok" : 0, "errmsg" : "couldn\'t get connection to mongo"}
+
+        metric = Metrics()
+        result=metric.GetCDDistribSize(conn, args, version, self.db_name, self.collection_name)
 
         out(json.dumps(result, default=json_util.default))
 
@@ -1110,6 +1356,32 @@ class MongoHandler:
 
         metric = Metrics()
         result=metric.GetCatMachineFormatFreq(conn, args, version, self.db_name, self.collection_name)
+
+        out(json.dumps(result, default=json_util.default))
+
+    def _edmachinereadformatfreq(self, args, out, name = None, version = None, db = None, collection = None):
+        if type(args).__name__ != 'dict':
+            return {"ok" : 0, "errmsg" : "_agregate must be a GET request"}
+
+        conn = self._get_connection(name)
+        if conn == None:
+            return {"ok" : 0, "errmsg" : "couldn\'t get connection to mongo"}
+
+        metric = Metrics()
+        result=metric.GetEDMachineReadFormatFreq(conn, args, version, self.db_name, self.collection_name)
+
+        out(json.dumps(result, default=json_util.default))
+
+    def _cdmachinereadformatfreq(self, args, out, name = None, version = None, db = None, collection = None):
+        if type(args).__name__ != 'dict':
+            return {"ok" : 0, "errmsg" : "_agregate must be a GET request"}
+
+        conn = self._get_connection(name)
+        if conn == None:
+            return {"ok" : 0, "errmsg" : "couldn\'t get connection to mongo"}
+
+        metric = Metrics()
+        result=metric.GetCDMachineReadFormatFreq(conn, args, version, self.db_name, self.collection_name)
 
         out(json.dumps(result, default=json_util.default))
 
@@ -1400,7 +1672,6 @@ class MongoHandler:
         out(json.dumps(result, default=json_util.default))
 
 
-
     def _catcountrynewmonthfreq(self, args, out, name = None, version = None, db = None, collection = None):
         if type(args).__name__ != 'dict':
             return {"ok" : 0, "errmsg" : "_agregate must be a GET request"}
@@ -1424,7 +1695,48 @@ class MongoHandler:
             return {"ok" : 0, "errmsg" : "couldn\'t get connection to mongo"}
 
         metric = Metrics()
-        result=metric.Getcatsitepagerank(conn, args, version, self.db_name, self.collection_name)
+        result=metric.Getcatsitepagerank(conn, args, version, self.db_name, self.job_collection_name)
+
+        out(json.dumps(result, default=json_util.default))
+
+
+    def _edcoremetadatafreq(self, args, out, name = None, version = None, db = None, collection = None):
+        if type(args).__name__ != 'dict':
+            return {"ok" : 0, "errmsg" : "_agregate must be a GET request"}
+
+        conn = self._get_connection(name)
+        if conn == None:
+            return {"ok" : 0, "errmsg" : "couldn\'t get connection to mongo"}
+
+        metric = Metrics()
+        result=metric.GetEDCoreMetadataFreq(conn, args, version, self.db_name, self.collection_name)
+
+        out(json.dumps(result, default=json_util.default))
+
+    def _catcoremetadatafreq(self, args, out, name = None, version = None, db = None, collection = None):
+        if type(args).__name__ != 'dict':
+            return {"ok" : 0, "errmsg" : "_agregate must be a GET request"}
+
+        conn = self._get_connection(name)
+        if conn == None:
+            return {"ok" : 0, "errmsg" : "couldn\'t get connection to mongo"}
+
+        metric = Metrics()
+        result=metric.GetCatCoreMetadataFreq(conn, args, version, self.db_name, self.collection_name)
+
+        out(json.dumps(result, default=json_util.default))
+
+
+    def _cataccessabilityfreq(self, args, out, name = None, version = None, db = None, collection = None):
+        if type(args).__name__ != 'dict':
+            return {"ok" : 0, "errmsg" : "_agregate must be a GET request"}
+
+        conn = self._get_connection(name)
+        if conn == None:
+            return {"ok" : 0, "errmsg" : "couldn\'t get connection to mongo"}
+
+        metric = Metrics()
+        result=metric.GetCatAccessabilityFreq(conn, args, version, self.db_name, self.collection_name)
 
         out(json.dumps(result, default=json_util.default))
 
@@ -1464,38 +1776,44 @@ class MongoHandler:
             except ValueError as e:
                 print (e)
 
-        print(dates)
+        # print(dates)
         metric = Metrics()
         result=metric.Getcatsinfo(conn, args, version, self.db_name, self.job_collection_name,dates)
 
-        out(json.dumps(result,default=self.date_handler))
+        out(json.dumps(result,default=self.__date_handler))
 
-    def _commands(self, args, out, name = None, version = None):
-        reserved_names = ["_MongoHandler__output_results",
-                "_MongoHandler__safety_check",
-                "__init__",
-                "_aggregate",
-                "_authenticate",
-                "_batch",
-                "_cmd",
-                "_commands",
-                "_connect",
-                "_find",
-                "_get_connection",
-                "_get_host_and_port",
-                "_get_son",
-                "_hello",
-                "_insert",
-                "_more",
-                "_remove",
-                "_status",
-                "_totalNumOfCatalogue",
-                "_update",
-                "sm_object_hook",
-                "date_handler",
-                "_collect_country_stats",
-                "_publishers",
-                "_categories"]
+    def _commands(self, args, out, name = None, version = None, db = None, collection = None):
+        reserved_names = [
+            "_MongoHandler__output_results",
+            "_MongoHandler__safety_check",
+            "_MongoHandler__collect_country_stats",
+            "_MongoHandler__date_handler",
+            "_MongoHandler__normalize_values",
+            "_MongoHandler__pearson",
+            "_MongoHandler__reject_outliers",
+            "_MongoHandler__reset_collection",
+            "_MongoHandler__set_collection",
+            "__init__",
+            "_aggregate",
+            "_authenticate",
+            "_batch",
+            "_cmd",
+            "_commands",
+            "_connect",
+            "_find",
+            "_get_connection",
+            "_get_host_and_port",
+            "_get_son",
+            "_hello",
+            "_insert",
+            "_more",
+            "_remove",
+            "_status",
+            "_totalNumOfCatalogue",
+            "_update",
+            "sm_object_hook",
+            "*__*",
+        ]
         all_functions = inspect.getmembers(self.__class__, inspect.ismethod)
 
         metric = Metrics()
@@ -1556,7 +1874,8 @@ class Metrics:
             for i in range(0,len(result['result'])):
                 nullfree_licenses=filter(bool, result['result'][i]['licenses'])
 
-                total_freqs.append({'_id':result['result'][i]['_id'],'licenses': len(nullfree_licenses)*100.00/result['result'][i]['counter']})
+                total_freqs.append({'_id':result['result'][i]['_id'],
+                    'licenses': len(nullfree_licenses)*100.00/result['result'][i]['counter']})
 
             return {'ok':1, 'result': total_freqs}
         else:
@@ -1564,7 +1883,8 @@ class Metrics:
 
 
 
-    def GetNumOfUniquePublishersContributingToCatalogue(self, conn, args, version = None, db = None, collection = None, limit = True):
+    def GetNumOfUniquePublishersContributingToCatalogue(self, conn, args, version = None, db = None, collection = None,
+            limit = True):
         # pipeline_args = {'group': '$author'}
         # document=self._aggregate(conn, args, pipeline_args, version, self.db_name, 'odm')
         #
@@ -1593,20 +1913,21 @@ class Metrics:
         # else:
         #     return document
         #
-
         if db == None or collection == None:
             return {"ok" : 0, "errmsg" : "db and collection must be defined"}
 
         pipeline = []
         if limit:
             pipeline.extend(({"$match": {'catalogue_url': { "$nin": [None,""]}}},
-                { '$group' :{'_id' : "$catalogue_url", 'authors': {'$addToSet': '$author'}, 'maintainers': {'$addToSet': '$maintainer'}, 'counter': {'$sum': 1}}},
+                { '$group' :{'_id' : "$catalogue_url", 'authors': {'$addToSet': '$author'},
+                    'maintainers': {'$addToSet': '$maintainer'}, 'counter': {'$sum': 1}}},
                 {'$sort':{'counter':-1}},
                 # {'$limit':10}
                 ))
         else:
             pipeline.extend(({"$match": {'catalogue_url': { "$nin": [None,""]}}},
-                { '$group' :{'_id' : "$catalogue_url", 'authors': {'$addToSet': '$author'}, 'maintainers': {'$addToSet': '$maintainer'}, 'counter': {'$sum': 1}}},
+                { '$group' :{'_id' : "$catalogue_url", 'authors': {'$addToSet': '$author'},
+                    'maintainers': {'$addToSet': '$maintainer'}, 'counter': {'$sum': 1}}},
                 ))
         result = conn[db][collection].aggregate(pipeline, allowDiskUse=True)
         # return result
@@ -1629,7 +1950,8 @@ class Metrics:
         # publishers=self.GetNumOfUniquePublishersContributingToCatalogue(conn, args, version, self.db_name, 'odm',False)
         pipeline=[]
         pipeline.extend(({"$match": {'catalogue_url': { "$nin": [None,""]}}},
-            { '$group' :{'_id' : "$catalogue_url", 'all_authors': {'$push': '$author'}, 'all_maintainers': {'$push': '$maintainer'},'counter': {'$sum': 1}}},
+            { '$group' :{'_id' : "$catalogue_url", 'all_authors': {'$push': '$author'},
+                'all_maintainers': {'$push': '$maintainer'},'counter': {'$sum': 1}}},
             {'$sort':{'counter':-1}},
             # {'$limit':10}
             ))
@@ -1648,7 +1970,8 @@ class Metrics:
                 free_maintainers=filter(None,result['result'][i]['all_maintainers'])
                 mergelist=list(set(free_maintainers+free_authors))
 
-                catuniqpublishersprop.append({'_id':result['result'][i]['_id'],'counter':(len(mergelist)*100.00)/(result['result'][i]['counter'])})
+                catuniqpublishersprop.append({'_id':result['result'][i]['_id'],
+                    'counter':(len(mergelist)*100.00)/(result['result'][i]['counter'])})
                 # catuniqpublishersprop.append({'_id':result['result'][i]['_id'],'counter':(len(mergelist)*100.00)/(len(result['result'][i]['authors'])+
                 #     len(result['result'][i]['maintainers']))})
 
@@ -1706,7 +2029,7 @@ class Metrics:
         result=conn[db][collection].aggregate([
             {'$match': {'catalogue_url': {'$nin': ['', None]}}},
             {'$match': match},
-            { '$group': { '_id': {'year':{'$year':'$extras.date_released'},'month':{'$month':'$extras.date_released'}},
+            {'$group': { '_id': {'year':{'$year':'$extras.date_released'},'month':{'$month':'$extras.date_released'}},
                     'catalogues':{'$push':'$catalogue_url'}, 'counter': {'$sum': 1}}},
             {'$sort':{'_id.year':-1,'_id.month':-1}}
             ])
@@ -1736,6 +2059,43 @@ class Metrics:
             return result
 
 
+    def GetDatasetsTotFreq(self, conn, args, version = None, db = None, collection = None):
+        result=conn[db][collection].aggregate([
+            {'$match': {'catalogue_url': {'$nin': ['', None]},
+                'is_duplicate':{'$ne':True},
+                'extras.unpublished':{'$ne':"true"},
+                }},
+            { '$group': { '_id': '$catalogue_url', 'count': {'$sum':1 }}},
+            { '$sort': {'count':-1 }},
+        ])
+
+        return result
+
+
+    def GetCDDatasetsFreq(self, conn, args, version = None, db = None, collection = None):
+        result=conn[db][collection].aggregate([
+            {'$match': {'country': {'$nin': ['', None]},
+                'is_duplicate':{'$ne':True},
+                }},
+            { '$group': { '_id': '$country', 'freq': {'$sum':1 }}},
+            { '$sort': {'freq':-1 }},
+        ])
+
+        return result
+
+
+    def GetDatasets(self, conn, args, version = None, db = None, collection = None):
+        result=conn[db][collection].aggregate([
+            {'$match': {'catalogue_url': {'$nin': ['', None]},
+                'is_duplicate':{'$ne':True},
+                }},
+            { '$group': { '_id': 0, 'freq': {'$sum':1 }}},
+            { '$sort': {'freq':-1 }},
+            { '$project': { '_id':0, 'freq':1 }},
+        ])
+
+        return result
+
 
     def GetTotalNumberOfCatalogues(self, conn, args, version = None, db = None, collection = None):
         # pipeline_args = {'group': '$cat_url'}
@@ -1749,10 +2109,31 @@ class Metrics:
         result=conn[db][collection].aggregate([
             {'$match': {'catalogue_url': {'$nin':['',None]}}},
             { '$group': { '_id': '', 'cat_size': {'$addToSet':'$catalogue_url' }}},
-            { '$project': { '_id':0, 'counter': {'$size': '$cat_size'} } },
+            { '$project': { '_id':0, 'count': {'$size': '$cat_size'} } },
             ])
 
+        # if result['ok']==1:
+        #     return {'ok':1, 'result': result['result'][0]['counter']}
+        # else:
         return result
+
+
+    def GetTotalDistribsFreq(self, conn, args, version = None, db = None, collection = None):
+        # EXCLUDE_COUNTRIES=re.compile('\.eu|datahub\.io')
+        result=conn[db][collection].aggregate([
+            {'$match': {'$and':[{'catalogue_url': {'$nin': ['', None]}},
+                {'resources':{'$exists':True}},
+                {'$or':[{'is_duplicate':False},{'is_duplicate':{'$exists':False}}]},
+                # {'catalogue_url':{'$not':EXCLUDE_COUNTRIES}}
+                ]}},
+            { '$group': {'_id' : 0, 'counter': {'$sum': {'$size': '$resources'}}}},
+            {'$project':{'_id':0,'counter':1}}
+        ])
+
+        if result['ok']==1:
+            return {'ok':1, 'result': result['result'][0]['counter']}
+        else:
+            return result
 
 
     def GetFreqOfCatalogues(self, conn, args, version = None, db = None, collection = None):
@@ -1825,9 +2206,11 @@ class Metrics:
             for i in range(0,len(result['result'])):
                 if len(result['result'][i]['_id'])>0:
                     cats.append({'_id':result['result'][i]['_id'][0],
-                        'counter':result['result'][i]['counter']*100.00/catalogues['result'][0]['counter']})
+                        # 'counter':result['result'][i]['counter']*100.00/catalogues['result'][0]['counter']})
+                        'counter':result['result'][i]['counter']*100.00/catalogues['result']})
                 else:
-                    cats.append({'_id':None,'counter':result['result'][i]['counter']*100.00/catalogues['result'][0]['counter']})
+                    # cats.append({'_id':None,'counter':result['result'][i]['counter']*100.00/catalogues['result'][0]['counter']})
+                    cats.append({'_id':None,'counter':result['result'][i]['counter']*100.00/catalogues['result']})
                 # result['result'][i]['counter']=result['result'][i]['counter']*100.00/catalogues['result'][0]['numberOfCatalogues']
         # return {'ok': 1, 'result': {'_id':catalogue, 'counter': result}}
 
@@ -1847,108 +2230,313 @@ class Metrics:
         #     return document
         #
         result=conn[db][collection].aggregate([
-            {'$match': {'organization.title': {'$nin': ['',None]}}},
+            {'$match': {'organization.title': {'$nin': ['',None]},
+                'catalogue_url': {'$nin': ['', None]},
+                'is_duplicate':{'$ne':True},
+                'extras.unpublished':{'$ne':"true"},
+                }},
             { '$group': { '_id': '$catalogue_url', 'unique_org_size': {'$addToSet': '$organization.title' }}},
             { '$unwind':"$unique_org_size" },
-            { '$group' : {'_id' : "$_id", 'counter' : {'$sum' : 1} } },
-            { '$sort': { 'counter': -1 } },
-            # {'$limit': 10}
-            ])
+            { '$group' : {'_id' : "$_id", 'count' : {'$sum' : 1} } },
+            { '$sort': { 'count': -1 } },
+        ])
 
         return result
 
+
+
+    ## returns the number of unique organisations publishing data (publishers)
+    def GetCDPublishersFreq(self, conn, args, version = None, db = None, collection = None):
+        result=conn[db][collection].aggregate([
+            {'$match': {'organization.title': {'$nin': ['',None]},
+                'country': {'$nin': ['', None]},
+                'is_duplicate':{'$ne':True},
+                }},
+            { '$group': { '_id': '$country', 'unique_org_size': {'$addToSet': '$organization.title' }}},
+            { '$unwind':"$unique_org_size" },
+            { '$group' : {'_id' : "$_id", 'freq' : {'$sum' : 1} } },
+            { '$sort': { 'freq': -1 } },
+        ])
+
+        return result
 
 
     ## returns the number of datasets with Open License
     ## (list from http://opendefinition.org/licenses)
     def GetNumberOfDatasetsWithOpenLicense(self, conn, args, version = None, db = None, collection = None):
         open_licenses=[
-            u'CC0',
+            u'CC0',u'CC0-1.0',
             u'ODC-PDDL',u'Open Data Commons Public Domain Dedication and Licence',u'PDDL',
-            u'CC BY',
+            u'CC BY',u'CC BY-2.5',u'CC BY-3.0',u'CC BY-3.0 AT',u'CC BY-3.0 DE',
+            u'CC BY-3.0 ES',u'CC BY-3.0 FI',u'CC BY-3.0 IT',u'CC BY-4.0',
             u'ODC-BY',
-            u'CC BY-SA',
-            u'ODC-ODbL',
-            u'Free Art License',
-            u'FAL',
-            u'OGL',
-            u'Open Government Licence - Canada 2.0',
+            u'CC BY-SA',u'CC BY-SA-1.0 FI',u'CC BY-SA-3.0 AT',u'CC BY-SA-3.0 CH',
+            u'CC BY-SA-3.0 ES',u'CC-BY-SA-4.0',
+            u'ODC-ODbL',u'ODbL',
+            u'Free Art License',u'FAL',
+            u'GFDL',u'GNU FDL',
+            u'GNU GPL-2.0',u'GNU GPL-3.0',
+            u'OGL',u'OGL-UK-2.0',u'OGL-UK-3.0 ',
+            u'Open Government Licence - Canada 2.0',u'Open Government Licence Canada 2.0',
             u'OGL-Canada-2.0',
-            u'GFDL',
             u'MirOS License',
             u'Talis Community License',
             u'Against DRM',
-            u'Design Science License',
-            u'EFF Open Audio License'
-            ]
-        # pipeline_args = {'group': '$license_title'}
-        # document=self._aggregate(conn, args, pipeline_args, version, 'odm', 'odm')
-        #
-        # if document['ok']==1:
-        #     document1=document['result']
-        #     i=0
-        #     j=0
-        #     catopenlicfreq=0
-        #     while i<len(document1):
-        # #         if document['result'][i]['_id']!=None:
-        #         while j<len(open_licenses):
-        #            string_matching=difflib.SequenceMatcher(None,str(open_licenses[j].encode('utf-8')), str(document1[i]['_id'].encode('utf-8'))).ratio()
-        #            if string_matching>0.8:
-        #                catopenlicfreq+=document1[i]['counter']
-        #                break
-        #            j+=1
-        #         j=0
-        #         i+=1
-        #     i=0
-        #
-        #     return {'ok': 1, 'result': catopenlicfreq}
-        # else:
-        #     return document
+            u'DL-DE-BY-2.0',u'Data licence Germany – attribution – version 2.0',u'Data licence Germany – Zero – version 2.0',
+            u'Design Science License',u'EFF Open Audio License',
+            u'SPL',
+            u'W3C license'
+        ]
+        tmp_collection='tmp_coll_openlic'
+
+        start_time=time.time()
+
+        combined_version = [u'CC BY-SA',u'CC BY',u'CC0',u'GNU GPL']
+
         start_time=time.time()
 
         result=conn[db][collection].aggregate([
-            {'$match': {'catalogue_url': {'$nin': ['',None]}}},
-            # {'$match': {'license_title': {'$nin': ['',None]}}},
+            {'$match': {'catalogue_url': {'$nin': ['', None]},
+                'license_id': {'$nin': ['',None]},
+                'is_duplicate':{'$ne':True},
+                'extras.unpublished':{'$ne':"true"},
+                }},
             {'$unwind': '$resources'},
-            { '$group': {'_id': '$catalogue_url', 'licenses': {'$push': '$license_id' },'counter' : {'$sum' : 1}}},
-            { '$sort': { 'counter': -1 } },
+            { '$group': {'_id': '$catalogue_url', 'licenses': {'$push': '$license_id' },'freq' : {'$sum' : 1}}},
+            { '$sort': { 'freq': -1 } },
+            {'$out':tmp_collection},
             ])
 
         total_freqs=[]
+        # tot_counter={}
+        if result['ok']==1:
+            result=conn[db][tmp_collection].find()
+            if result.count()>0:
+            # for i in range(0,len(result['result'])):
+                for res in result:
+                    dict_licenses={}
+                    counter=0
+                    tot_counter=0
+                    dict_licenses={}
+                    # for j in range(0,len(result['result'][i]['licenses'])):
+                    for j in range(0,len(res['licenses'])):
+                        # db_lic=result['result'][i]['licenses'][j]
+                        db_lic=res['licenses'][j]
+                        for comb in combined_version:
+                            if db_lic.startswith(comb):
+                                db_lic = comb
+                                break
+                        for open_lic in open_licenses:
+                            if open_lic==db_lic:
+                                if db_lic in dict_licenses:
+                                    dict_licenses[db_lic]+=1
+                                else:
+                                    dict_licenses[db_lic]=1
+                                counter+=1
+                                break
+                        tot_counter+=1
+
+                    sorted_licenses=OrderedDict()
+                    for key, value in sorted(dict_licenses.iteritems(), key=lambda (k,v): (v,k),reverse=True):
+                        # sorted_licenses[key]=value/tot_counter
+                        sorted_licenses[key]=value
+                    total_freqs.append({'_id':res['_id'],'licenses': sorted_licenses,
+                        'count':counter,'tot_count':tot_counter})
+
+            conn[db].drop_collection(tmp_collection)
+
+            print (time.time()-start_time)
+            return {'ok':1, 'result': total_freqs}
+        else:
+            return result
+
+
+        # total_freqs=[]
+        # if result['ok']==1:
+        #     for i in range(0,len(result['result'])):
+        #         dict_licenses={}
+        #         for j in range(0,len(result['result'][i]['licenses'])):
+        #             key=result['result'][i]['licenses'][j]
+        #             if key not in ['',None]:
+        #                 if key in dict_licenses:
+        #                     dict_licenses[key]+=1
+        #                 else:
+        #                     dict_licenses[key]=1
+        #
+        #         del_licenses=[]
+        #         for key_license in dict_licenses:
+        #             not_open_license=True
+        #             k=0
+        #             try:
+        #                 while k<len(open_licenses):
+        #                     string_matching=difflib.SequenceMatcher(None,open_licenses[k].encode('utf8'),
+        #                             str(key_license.encode('utf-8'))).ratio()
+        #                     if string_matching>0.9:
+        #                         not_open_license = False
+        #                         break
+        #                     k+=1
+        #             except UnicodeEncodeError as e:
+        #                 print (e,key_license)
+        #             if not_open_license:
+        #                 del_licenses.append(key_license)
+        #
+        #         for key in del_licenses:
+        #             del dict_licenses[key]
+        #
+        #         sorted_licenses=OrderedDict()
+        #         for key, value in sorted(dict_licenses.iteritems(), key=lambda (k,v): (v,k),reverse=True):
+        #             sorted_licenses[key]=value
+        #         total_freqs.append({'_id':result['result'][i]['_id'],'licenses': sorted_licenses})
+
+
+
+    def GetEDOpenLicenseFreq(self, conn, args, version = None, db = None, collection = None):
+        open_licenses=[
+            u'CC0',u'CC0-1.0',
+            u'ODC-PDDL',u'Open Data Commons Public Domain Dedication and Licence',u'PDDL',
+            u'CC BY',u'CC BY-2.5',u'CC BY-3.0',u'CC BY-3.0 AT',u'CC BY-3.0 DE',
+            u'CC BY-3.0 ES',u'CC BY-3.0 FI',u'CC BY-3.0 IT',u'CC BY-4.0',
+            u'ODC-BY',
+            u'CC BY-SA',u'CC BY-SA-1.0 FI',u'CC BY-SA-3.0 AT',u'CC BY-SA-3.0 CH',
+            u'CC BY-SA-3.0 ES',u'CC-BY-SA-4.0',
+            u'ODC-ODbL',u'ODbL',
+            u'Free Art License',u'FAL',
+            u'GFDL',u'GNU FDL',
+            u'GNU GPL-2.0',u'GNU GPL-3.0',
+            u'OGL',u'OGL-UK-2.0',u'OGL-UK-3.0 ',
+            u'Open Government Licence - Canada 2.0',u'Open Government Licence Canada 2.0',
+            u'OGL-Canada-2.0',
+            u'MirOS License',
+            u'Talis Community License',
+            u'Against DRM',
+            u'DL-DE-BY-2.0',u'Data licence Germany – attribution – version 2.0',u'Data licence Germany – Zero – version 2.0',
+            u'Design Science License',u'EFF Open Audio License',
+            u'SPL',
+            u'W3C license'
+        ]
+
+        combined_version = [u'CC BY-SA',u'CC BY',u'CC0',u'GNU GPL']
+
+        start_time=time.time()
+
+        results=conn[db][collection].find(
+            {'catalogue_url': {'$nin': ['', None]},
+                'license_id': {'$nin': ['',None]},
+                'is_duplicate':{'$ne':True},
+                'extras.unpublished':{'$ne':"true"},
+                },
+            # {'$unwind': '$resources'},
+            # { '$group': {'_id': 0, 'licenses': {'$push': '$license_id' },'freq' : {'$sum' : 1}}},
+            {'_id':0,'license_id':1,'resources.url':1,'num_resources':1,
+                # 'catalogue_url':1,
+                },
+            )
+        results.batch_size(MongoHandler.batchSize)
+
+        total_freqs=[]
+        tot_counter=0
+        if results.count()>0:
+            dict_licenses={}
+            for result in results:
+                # if 'num_resources' in result and 'resources' in result and 'license_id' in result:
+                if 'resources' in result and 'license_id' in result:
+                    db_lic = result['license_id']
+                    for comb in combined_version:
+                        if db_lic.startswith(comb):
+                            db_lic = comb
+                            break
+                    for open_lic in open_licenses:
+                        # distribs_size=result['num_resources']
+                        distribs_size=len(result['resources'])
+                        if open_lic==db_lic:
+                            if db_lic in dict_licenses:
+                                dict_licenses[db_lic]+=distribs_size
+                            else:
+                                dict_licenses[db_lic]=distribs_size
+                            break
+                    tot_counter+=distribs_size
+
+
+            sorted_licenses=OrderedDict()
+            counter=0
+            if tot_counter>0:
+                for key, value in sorted(dict_licenses.iteritems(), key=lambda (k,v): (v,k),reverse=True):
+                    counter+=value
+                    sorted_licenses[key]=value/tot_counter
+                total_freqs.append({'licenses': sorted_licenses,'freq':counter/tot_counter})
+            else:
+                total_freqs.append({'licenses': sorted_licenses,'freq':counter})
+
+            print (time.time()-start_time)
+            return {'ok':1, 'result': total_freqs}
+        else:
+            return result
+
+
+    def GetCDOpenLicenseFreq(self, conn, args, version = None, db = None, collection = None):
+        open_licenses=[
+            u'CC0',u'CC0-1.0',
+            u'ODC-PDDL',u'Open Data Commons Public Domain Dedication and Licence',u'PDDL',
+            u'CC BY',u'CC BY-2.5',u'CC BY-3.0',u'CC BY-3.0 AT',u'CC BY-3.0 DE',
+            u'CC BY-3.0 ES',u'CC BY-3.0 FI',u'CC BY-3.0 IT',u'CC BY-4.0',
+            u'ODC-BY',
+            u'CC BY-SA',u'CC BY-SA-1.0 FI',u'CC BY-SA-3.0 AT',u'CC BY-SA-3.0 CH',
+            u'CC BY-SA-3.0 ES',u'CC-BY-SA-4.0',
+            u'ODC-ODbL',u'ODbL',
+            u'Free Art License',u'FAL',
+            u'GFDL',u'GNU FDL',
+            u'GNU GPL-2.0',u'GNU GPL-3.0',
+            u'OGL',u'OGL-UK-2.0',u'OGL-UK-3.0 ',
+            u'Open Government Licence - Canada 2.0',u'Open Government Licence Canada 2.0',
+            u'OGL-Canada-2.0',
+            u'MirOS License',
+            u'Talis Community License',
+            u'Against DRM',
+            u'DL-DE-BY-2.0',u'Data licence Germany – attribution – version 2.0',u'Data licence Germany – Zero – version 2.0',
+            u'Design Science License',u'EFF Open Audio License',
+            u'SPL',
+            u'W3C license'
+        ]
+        start_time=time.time()
+
+        combined_version = [u'CC BY-SA',u'CC BY',u'CC0',u'GNU GPL']
+
+        start_time=time.time()
+
+        result=conn[db][collection].aggregate([
+            {'$match': {'country': {'$nin': ['', None]},
+                'license_id': {'$nin': ['',None]},
+                'is_duplicate':{'$ne':True},
+                }},
+            {'$unwind': '$resources'},
+            { '$group': {'_id': '$country', 'licenses': {'$push': '$license_id' },'freq' : {'$sum' : 1}}},
+            { '$sort': { 'freq': -1 } },
+            ])
+
+        total_freqs=[]
+        tot_counter={}
         if result['ok']==1:
             for i in range(0,len(result['result'])):
+                tot_counter=0
                 dict_licenses={}
                 for j in range(0,len(result['result'][i]['licenses'])):
-                    key=result['result'][i]['licenses'][j]
-                    if key not in ['',None]:
-                        if key in dict_licenses:
-                            dict_licenses[key]+=1
-                        else:
-                            dict_licenses[key]=1
-
-                del_licenses=[]
-                for key_license in dict_licenses:
-                    not_open_license=True
-                    k=0
-                    try:
-                        while k<len(open_licenses):
-                            string_matching=difflib.SequenceMatcher(None,open_licenses[k].encode('utf8'),
-                                    str(key_license.encode('utf-8'))).ratio()
-                            if string_matching>0.9:
-                                not_open_license = False
-                                break
-                            k+=1
-                    except UnicodeEncodeError as e:
-                        print (e,key_license)
-                    if not_open_license:
-                        del_licenses.append(key_license)
-
-                for key in del_licenses:
-                    del dict_licenses[key]
+                    db_lic=result['result'][i]['licenses'][j]
+                    for comb in combined_version:
+                        if db_lic.startswith(comb):
+                            db_lic = comb
+                            break
+                    for open_lic in open_licenses:
+                        if open_lic==db_lic:
+                            if db_lic in dict_licenses:
+                                dict_licenses[db_lic]+=1
+                            else:
+                                dict_licenses[db_lic]=1
+                            break
+                    tot_counter+=1
 
                 sorted_licenses=OrderedDict()
                 for key, value in sorted(dict_licenses.iteritems(), key=lambda (k,v): (v,k),reverse=True):
-                    sorted_licenses[key]=value
+                    sorted_licenses[key]=value/tot_counter
                 total_freqs.append({'_id':result['result'][i]['_id'],'licenses': sorted_licenses})
 
             print (time.time()-start_time)
@@ -1962,22 +2550,21 @@ class Metrics:
         open_licenses=[
             u'CC0',
             u'ODC-PDDL',u'Open Data Commons Public Domain Dedication and Licence',u'PDDL',
-            u'CC BY',
+            u'CC BY',u'CC-BY-4.0',
             u'ODC-BY',
-            u'CC BY-SA',
-            u'ODC-ODbL',
-            u'Free Art License',
-            u'FAL',
-            u'OGL',
-            u'Open Government Licence - Canada 2.0',
+            u'CC BY-SA',u'CC-BY-SA-4.0',
+            u'ODC-ODbL',u'ODbL',
+            u'Free Art License',u'FAL',
+            u'GFDL',u'GNU FDL',
+            u'OGL',u'OGL-UK-2.0',u'OGL-UK-3.0 ',
+            u'Open Government Licence - Canada 2.0',u'Open Government Licence Canada 2.0',
             u'OGL-Canada-2.0',
-            u'GFDL',
             u'MirOS License',
             u'Talis Community License',
             u'Against DRM',
-            u'Design Science License',
-            u'EFF Open Audio License'
-            ]
+            u'DL-DE-BY-2.0',u'Data licence Germany – attribution – version 2.0',u'Data licence Germany – Zero – version 2.0',
+            u'Design Science License',u'EFF Open Audio License'
+        ]
         # pipeline_args = {'group': '$license_title'}
         # document=self._aggregate(conn, args, pipeline_args, version, 'odm', 'odm', False)
         #
@@ -2061,8 +2648,125 @@ class Metrics:
             return result
 
 
+    def GetOpenLicenseFreqPerDate(self, conn, args, version = None, db = None, collection = None):
+        open_licenses=[
+            u'CC0',
+            u'ODC-PDDL',u'Open Data Commons Public Domain Dedication and Licence',u'PDDL',
+            u'CC BY',u'CC-BY-4.0',
+            u'ODC-BY',
+            u'CC BY-SA',u'CC-BY-SA-4.0',
+            u'ODC-ODbL',u'ODbL',
+            u'Free Art License',u'FAL',
+            u'GFDL',u'GNU FDL',
+            u'OGL',u'OGL-UK-2.0',u'OGL-UK-3.0 ',
+            u'Open Government Licence - Canada 2.0',u'Open Government Licence Canada 2.0',
+            u'OGL-Canada-2.0',
+            u'MirOS License',
+            u'Talis Community License',
+            u'Against DRM',
+            u'DL-DE-BY-2.0',u'Data licence Germany – attribution – version 2.0',u'Data licence Germany – Zero – version 2.0',
+            u'Design Science License',u'EFF Open Audio License'
+        ]
+
+        start_time=time.time()
+
+        match={'$and':[{'catalogue_url': {'$nin': ['',None]}},
+            {'license_id':{'$nin':['',None]}},
+            {'extras.date_released':{'$type':9}}]}
+        # end_date=datetime.now()
+        if "end_date" in args:
+            try:
+                end_date=datetime.strptime(args['end_date'][0], '%Y-%m-%d')
+                match['$and'].append({'extras.date_released':{'$lte':end_date}})
+            except ValueError as e:
+                print (e)
+        # start_date=end_date + relativedelta(years=-1)
+        if "start_date" in args:
+            try:
+                start_date=datetime.strptime(args['start_date'][0], '%Y-%m-%d')
+                match['$and'].append({'extras.date_released':{'$gte':start_date}})
+            except ValueError as e:
+                print (e)
+
+            # {'$group': { '_id': {'year':{'$year':'$extras.date_released'},'month':{'$month':'$extras.date_released'}},
+            #         'catalogues':{'$push':'$catalogue_url'}, 'counter': {'$sum': 1}}},
+        result=conn[db][collection].aggregate([
+            # {'$match': {'$and':[{'catalogue_url': {'$nin': ['',None]}},
+            #     {'extras.date_released':{'$type':9}},{'license_id':{'$nin':['',None]}}]}},
+            {'$match': match},
+            {'$unwind': '$resources'},
+            { '$group': {'_id': 0, 'licenses': {'$push': {'lic':'$license_id','date':'$extras.date_released'} },
+                'counter' : {'$sum' : 1}}},
+        ])
+
+        total_freqs=[]
+        if result['ok']==1:
+            datedict={}
+            for i in range(0,len(result['result'])):
+                dict_licenses={}
+                for j in range(0,len(result['result'][i]['licenses'])):
+                    key=result['result'][i]['licenses'][j]['lic']
+
+                    lic_dt=result['result'][i]['licenses'][j]['date']
+                    roundup_lic_dt=date(lic_dt.year,
+                            lic_dt.month,1)
+                    # print(roundup_lic_dt)
+                    if roundup_lic_dt not in datedict:
+                        datedict[roundup_lic_dt]=dict()
+                    if key in datedict[roundup_lic_dt]:
+                        datedict[roundup_lic_dt][key]+=1
+                    else:
+                        datedict[roundup_lic_dt][key]=1
+
+            del_dts=[]
+            for _dts in datedict:
+                del_licenses=[]
+                # print(_dts)
+                for key_license in datedict[_dts]:
+                    not_open_license=True
+                    k=0
+                    try:
+                        while k<len(open_licenses):
+                            string_matching=difflib.SequenceMatcher(None,open_licenses[k].encode('utf8'),
+                                    str(key_license.encode('utf-8'))).ratio()
+                            if string_matching>0.9:
+                                not_open_license = False
+                                break
+                            k+=1
+                    except UnicodeEncodeError as e:
+                        print (e,key_license)
+                    if not_open_license:
+                        del_licenses.append(key_license)
+
+                for key in del_licenses:
+                    del datedict[_dts][key]
+
+                if len(datedict[_dts])==0:
+                    del_dts.append(_dts)
+
+            for key in del_dts:
+                del datedict[key]
+
+            # sorted_licenses=OrderedDict()
+            # for key, value in sorted(dict_licenses.iteritems(), key=lambda (k,v): (v,k),reverse=True):
+            #     sorted_licenses[key]=value
+            # total_freqs.append({'_id':result['result'][i]['_id'],'licenses': sorted_licenses})
+
+            total_freqs=[]
+            sorted_datedict=(sorted(datedict.items(),key=operator.itemgetter(0)))
+            sorted_datedict.reverse()
+            for _dt in sorted_datedict:
+                total_freqs.append({'date':str(_dt[0]),'freq':_dt[1]})
+
+            print (time.time()-start_time)
+            return {'ok':1, 'result': total_freqs}
+        else:
+            return result
+
+
     ##Get frequency of datasets by license type
     def GetFrequencyOfDatasetsByLicenseType(self, conn, args, version = None, db = None, collection = None):
+        tmp_collection='tmp_catdsbylicensefreq'
         # pipeline_args = {'group': '$license_title','limit': 10}
         # document=self._aggregate(conn, args, pipeline_args, version, db, collection
         start_time = time.time()
@@ -2072,33 +2776,39 @@ class Metrics:
             {'$unwind': '$resources'},
             { '$group': {'_id': '$catalogue_url', 'licenses': {'$push': '$license_id' },'counter' : {'$sum' : 1}}},
             { '$sort': { 'counter': -1 } },
+            {'$out':tmp_collection},
             ])
 
         total_freqs=[]
         if result['ok']==1:
-            for i in range(0,len(result['result'])):
-                dict_licenses={}
-                for j in range(0,len(result['result'][i]['licenses'])):
-                    key=result['result'][i]['licenses'][j]
-                    if key=='':
-                        continue
-                    if key in dict_licenses:
-                        dict_licenses[key]+=1
-                    else:
-                        # try:
-                        #     dict_licenses[str(key)]=1
-                        # except UnicodeEncodeError:
-                        #     print ('error with key: %s' % key)
-                        dict_licenses[key]=1
+            result=conn[db][tmp_collection].find()
+            if result.count()>0:
+                for res in result:
+                    dict_licenses={}
+                    for j in range(0,len(res['licenses'])):
+                        key=res['licenses'][j]
+                        if key=='':
+                            continue
+                        if key in dict_licenses:
+                            dict_licenses[key]+=1
+                        else:
+                            # try:
+                            #     dict_licenses[str(key)]=1
+                            # except UnicodeEncodeError:
+                            #     print ('error with key: %s' % key)
+                            dict_licenses[key]=1
 
-                sorted_licenses=OrderedDict()
-                for key, value in sorted(dict_licenses.iteritems(), key=lambda (k,v): (v,k),reverse=True):
-                    sorted_licenses[key]=value
-                total_freqs.append({'_id':result['result'][i]['_id'],'licenses': sorted_licenses})
+                    sorted_licenses=OrderedDict()
+                    for key, value in sorted(dict_licenses.iteritems(), key=lambda (k,v): (v,k),reverse=True):
+                        sorted_licenses[key]=value
+                    total_freqs.append({'_id':res['_id'],'licenses': sorted_licenses})
 
+            conn[db].drop_collection(tmp_collection)
             print (time.time()-start_time)
+
             return {'ok':1, 'result': total_freqs}
         else:
+            conn[db].drop_collection(tmp_collection)
             return result
 
 
@@ -2179,6 +2889,208 @@ class Metrics:
                 for key, value in sorted(dict_formats.iteritems(), key=lambda (k,v): (v,k),reverse=True):
                     sorted_formats[key]=value
                 total.append({'_id':result['result'][i]['_id'],'formats': sorted_formats})
+
+            print (time.time() - start_time)
+
+            return {'ok':1, 'result': total}
+        else:
+            return result
+
+
+    def GetEDNonProprietaryFormatFreq(self, conn, args, version = None, db = None, collection = None):
+        # pipeline_args = {'group': '$resources.format', 'unwind': '$resources'}
+        # document=self._aggregate(conn, args, pipeline_args, version, 'odm', 'odm')
+        #
+        # return document
+        non_propr = [
+                'ascii',
+                'audio/mpeg',
+                'bmp',
+                'cdf',
+                'csv',
+                'csv.zip',
+                'dbf',
+                'geojson',
+                'geotiff',
+                'gzip',
+                'html',
+                'iati',
+                'ical',
+                'ics',
+                'jpeg 2000',
+                'json',
+                'kml',
+                'kmz',
+                'mpeg',
+                'netcdf',
+                'nt',
+                'ods',
+                'pdf',
+                'pdf/a',
+                'png',
+                'psv',
+                'psv.zip',
+                'rdf',
+                'rdfa',
+                'rss',
+                'rtf',
+                'sparql',
+                'sparql web form',
+                'tar',
+                'tiff',
+                'tsv',
+                'ttl',
+                'txt',
+                'wms',
+                'xml',
+                'xml.zip',
+                'zip',
+                ]
+
+        regex = re.compile("[.-]+ *")
+
+        start_time=time.time()
+
+        result=conn[db][collection].aggregate([
+            {'$match': {'catalogue_url': {'$nin': ['', None]},
+                'is_duplicate':{'$ne':True},
+                'extras.unpublished':{'$ne':"true"},
+                }},
+            {'$unwind':'$resources'},
+            { '$group': { '_id': 0, 'resources': {'$push': '$resources.format' },'counter' : {'$sum' : 1}}},
+            # { '$sort': { 'counter': -1 } },
+            ])
+
+        if result['ok']==1:
+            total=[]
+            for i in range(0,len(result['result'])):
+                tot_count=0
+                # dict_formats={}
+                format_count=0
+                for j in range(0,len(result['result'][i]['resources'])):
+                    tot_count+=1
+                    format_key=result['result'][i]['resources'][j]
+                    try:
+                        format_key=regex.sub('',format_key)
+                    except TypeError,e:
+                        print(e,format_key)
+                        continue
+                    format_key=format_key.lower()
+                    if format_key in non_propr:
+                        format_count+=1
+                    # if format_key not in non_propr:
+                    #     continue
+                    #
+                    # if format_key in dict_formats:
+                    #     dict_formats[format_key]+=1
+                    # else:
+                    #     dict_formats[format_key]=1
+
+                # sorted_formats=OrderedDict()
+                # for key, value in sorted(dict_formats.iteritems(), key=lambda (k,v): (v,k),reverse=True):
+                #     sorted_formats[key]=value/tot_count
+
+                # total.append({'_id':result['result'][i]['_id'],'formats': sorted_formats})
+                total.append({'freq': format_count/tot_count})
+
+            print (time.time() - start_time)
+
+            return {'ok':1, 'result': total}
+        else:
+            return result
+
+
+    def GetCatNonProprietaryFormatFreq(self, conn, args, version = None, db = None, collection = None):
+        non_propr = [
+                'ascii',
+                'audio/mpeg',
+                'bmp',
+                'cdf',
+                'csv',
+                'csv.zip',
+                'dbf',
+                'geojson',
+                'geotiff',
+                'gzip',
+                'html',
+                'iati',
+                'ical',
+                'ics',
+                'jpeg 2000',
+                'json',
+                'kml',
+                'kmz',
+                'mpeg',
+                'netcdf',
+                'nt',
+                'ods',
+                'pdf',
+                'pdf/a',
+                'png',
+                'psv',
+                'psv.zip',
+                'rdf',
+                'rdfa',
+                'rss',
+                'rtf',
+                'sparql',
+                'sparql web form',
+                'tar',
+                'tiff',
+                'tsv',
+                'ttl',
+                'txt',
+                'wms',
+                'xml',
+                'xml.zip',
+                'zip',
+                ]
+
+        regex = re.compile("[.-]+ *")
+
+        start_time=time.time()
+
+        result=conn[db][collection].aggregate([
+            {'$match': {'catalogue_url': {'$nin': ['', None]},
+                'is_duplicate':{'$ne':True},
+                'extras.unpublished':{'$ne':"true"},
+                }},
+            {'$unwind':'$resources'},
+            { '$group': { '_id': '$catalogue_url', 'resources': {'$push': '$resources.format' },'count' : {'$sum' : 1}}},
+            { '$sort': { 'count': -1 } },
+            ])
+
+        if result['ok']==1:
+            total=[]
+            for i in range(0,len(result['result'])):
+                tot_count=0
+                # dict_formats={}
+                format_count=0
+                for j in range(0,len(result['result'][i]['resources'])):
+                    tot_count+=1
+                    format_key=result['result'][i]['resources'][j]
+                    try:
+                        format_key=regex.sub('',format_key)
+                    except TypeError,e:
+                        print(e,format_key)
+                        continue
+                    format_key=format_key.lower()
+                    if format_key in non_propr:
+                        format_count+=1
+                    # if format_key not in non_propr:
+                    #     continue
+                    #
+                    # if format_key in dict_formats:
+                    #     dict_formats[format_key]+=1
+                    # else:
+                    #     dict_formats[format_key]=1
+
+                # sorted_formats=OrderedDict()
+                # for key, value in sorted(dict_formats.iteritems(), key=lambda (k,v): (v,k),reverse=True):
+                #     sorted_formats[key]=value/tot_count
+
+                total.append({'_id':result['result'][i]['_id'],'count': format_count,
+                    'tot_count':tot_count})
 
             print (time.time() - start_time)
 
@@ -2271,7 +3183,8 @@ class Metrics:
         result=conn[db][collection].aggregate([
             {'$match': {'catalogue_url':{'$nin':['',None]}}},
             {'$match': {'extras.date_released':{'$type':9}}},
-            { '$group': {'_id' : '$catalogue_url', 'years': {'$push': {'$year': '$extras.date_released'}}, 'counter': {'$sum': 1}}},
+            { '$group': {'_id' : '$catalogue_url', 'years': {'$push': {'$year': '$extras.date_released'}},
+                'counter': {'$sum': 1}}},
             {'$sort': { 'counter':-1}},
             # {'$limit': 10}
             ])
@@ -2281,14 +3194,19 @@ class Metrics:
             cat_mean=[]
             for i in range(0,len(result['result'])):
                 # cat_mean.append({'catalogue':result['result'][i]['_id'],'median_age':numpy.median(result['result'][i]['years'])})
-                dates=self.reject_outliers(numpy.array(result['result'][i]['years']),m=6)
+                # print('%d) before: %s' % (i,numpy.array(result['result'][i]['years'])))
+                dates=self.__reject_outliers(numpy.array(result['result'][i]['years']),m=3)
+                # print('%d) after : %s' % (i,dates))
                 dates=dates.tolist()
 
                 # print(type(dates))
                 dates.sort(key=int)
 
                 # result['result'][i]['dates']=dates
-                cat_mean.append(curr_date.year-dates[0])
+                try:
+                    cat_mean.append(curr_date.year-dates[0])
+                except IndexError:
+                    pass
 
             return {'ok':1, 'result': numpy.median(cat_mean)}
         else:
@@ -2300,7 +3218,8 @@ class Metrics:
         result=conn[db][collection].aggregate([
             {'$match': {'catalogue_url':{'$nin':['',None]}}},
             {'$match': {'extras.date_released':{'$type':9}}},
-            { '$group': {'_id' : '$catalogue_url', 'years': {'$push': {'$year': '$extras.date_released'}}, 'counter': {'$sum': 1}}},
+            { '$group': {'_id' : '$catalogue_url', 'years': {'$push': {'$year': '$extras.date_released'}},
+                'counter': {'$sum': 1}}},
             {'$sort': { 'counter':-1}},
             # {'$limit': 10}
             ])
@@ -2311,14 +3230,17 @@ class Metrics:
             for i in range(0,len(result['result'])):
                 # cat_mean.append({'catalogue':result['result'][i]['_id'],'mean_age':numpy.mean(result['result'][i]['years'])})
                 # dates=result['result'][i]['years']
-                dates=self.reject_outliers(numpy.array(result['result'][i]['years']),m=6)
+                dates=self.__reject_outliers(numpy.array(result['result'][i]['years']),m=3)
                 dates=dates.tolist()
 
                 # print(type(dates))
                 dates.sort(key=int)
 
                 # result['result'][i]['dates']=dates
-                cat_mean.append(curr_date.year-dates[0])
+                try:
+                    cat_mean.append(curr_date.year-dates[0])
+                except IndexError:
+                    pass
 
             # return {'ok':1, 'result': result['result']}
             return {'ok':1, 'result': numpy.mean(cat_mean)}
@@ -2326,26 +3248,17 @@ class Metrics:
             return result
 
 
-    def reject_outliers(self, data, m = 2.):
-        return data[abs(data - numpy.mean(data)) < m * numpy.std(data)]
-
-        d = numpy.abs(data - numpy.median(data))
-        mdev = numpy.median(d)
-        s = d/mdev if mdev else 0.
-        return data[s<m]
-
-
     def GetCatNewMonthFreq(self, conn, args, version = None, db = None, collection = None):
         # months={1: 'January',2: 'February', 3: 'March', 4: 'April', 5: 'May', 6: 'June', 7: 'July', 8: 'August', 9: 'September',
         #         10: 'October', 11: 'November', 12: 'December'}
-
         end_date=datetime.now()
         if "end_date" in args:
             try:
                 end_date=datetime.strptime(args['end_date'][0], '%Y-%m-%d')
             except ValueError as e:
                 print (e)
-        start_date=end_date + relativedelta(years=-1)
+        # start_date=end_date + relativedelta(years=-1)
+        start_date=datetime(1900,1,1,0,0,0)
         if "start_date" in args:
             try:
                 start_date=datetime.strptime(args['start_date'][0], '%Y-%m-%d')
@@ -2365,9 +3278,26 @@ class Metrics:
             date_catalogues=[]
             d=defaultdict(list)
             for i in range(0,len(result['result'])):
-                cat_date=min(result['result'][i]['dates'])
-                # cat_initiated({datetime.date(year=cat_date.year,month=cat_date=month): result['result'][i]['_id']})
-                d[date(cat_date.year,cat_date.month,1)].append(result['result'][i]['_id'])
+                # cat_date=min(result['result'][i]['dates'])
+                # # cat_initiated({datetime.date(year=cat_date.year,month=cat_date=month): result['result'][i]['_id']})
+                # d[date(cat_date.year,cat_date.month,1)].append(result['result'][i]['_id'])
+
+                dates=result['result'][i]['dates']
+
+                years=[t.year for t in dates]
+                years=self.__reject_outliers(numpy.array(years),m=2)
+                years=years.tolist()
+                years.sort(key=int)
+
+                if years:
+                    cat_date=None
+                    dates.sort()
+                    for j in dates:
+                        if j.year==years[0]:
+                            cat_date=j
+                            break
+
+                    d[date(cat_date.year,cat_date.month,1)].append(result['result'][i]['_id'])
 
             i=date(end_date.year,end_date.month,1)
             while i > date(start_date.year,start_date.month,1):
@@ -2421,7 +3351,9 @@ class Metrics:
         if not limit:
             result=conn[db][collection].aggregate([
                 # {'$match': {'resources.0': {'$exists': True}}},
-                {'$match': {'catalogue_url': {'$nin': ['', None]}}},
+                {'$match': {'catalogue_url': {'$nin': ['', None]},
+                    'is_duplicate':{'$ne':True},
+                    }},
                 {'$unwind': '$resources'},
                 { '$group': { '_id': '$catalogue_url', 'counter': {'$sum': 1}}},
                 # { '$group': { '_id': '$catalogue_url', 'distrib_size': {'$push':1 }}},
@@ -2430,7 +3362,9 @@ class Metrics:
                 ])
         else:
             result=conn[db][collection].aggregate([
-                {'$match': {'catalogue_url': {'$nin': ['', None]}}},
+                {'$match': {'catalogue_url': {'$nin': ['', None]},
+                    'is_duplicate':{'$ne':True},
+                    }},
                 {'$match': match},
                 {'$unwind': '$resources'},
                 { '$group': { '_id': {'year':{'$year':'$extras.date_released'},'month':{'$month':'$extras.date_released'}},
@@ -2464,16 +3398,91 @@ class Metrics:
 
 
 
+    def GetCatDistribsTotFreq(self, conn, args, version = None, db = None, collection = None, limit= True):
+        result=conn[db][collection].aggregate([
+            {'$match': {'catalogue_url': {'$nin': ['', None]},
+                'is_duplicate':{'$ne':True},
+                'extras.unpublished':{'$ne':"true"},
+                }},
+            {'$match': {'resources':{'$exists':True}}},
+            { '$group': {'_id' : '$catalogue_url', 'count': {'$sum': {'$size': '$resources'}}}},
+            {'$sort':{'count':-1}},
+        ])
+
+        return result
+
+
+
+    def GetCDDistribsFreq(self, conn, args, version = None, db = None, collection = None, limit= True):
+        result=conn[db][collection].aggregate([
+            {'$match': {'country': {'$nin': ['', None]},
+                'is_duplicate':{'$ne':True},
+                }},
+            {'$match': {'resources':{'$exists':True}}},
+            { '$group': {'_id' : '$country', 'freq': {'$sum': {'$size': '$resources'}}}},
+            {'$sort':{'freq':-1}},
+        ])
+
+        return result
+
+
+
+    def GetCatDistribs(self, conn, args, version = None, db = None, collection = None, limit= True):
+        result=conn[db][collection].aggregate([
+            {'$match': {'catalogue_url': {'$nin': ['', None]},
+                'is_duplicate':{'$ne':True},
+                }},
+            {'$match': {'resources':{'$exists':True}}},
+            { '$group': {'_id' : 0, 'freq': {'$sum': {'$size': '$resources'}}}},
+            {'$sort':{'freq':-1}},
+            {'$project': {'_id':0,'freq':1}}
+        ])
+
+        return result
+
+
+
     def GetCatDataSizeTotal(self, conn, args, version = None, db = None, collection = None):
         result=conn[db][collection].aggregate([
-            {'$match': {'catalogue_url':{'$nin':['',None]}}},
+            {'$match': {'catalogue_url': {'$nin': ['', None]},
+                'is_duplicate':{'$ne':True},
+                'extras.unpublished':{'$ne':"true"},
+                }},
             # {'$match': {'resources.0': {'$exists': True}}},
             {'$unwind': "$resources" },
             # {'$match': {'resources.size':{'$nin':['',None]}}},
-            { '$group': {'_id' : '$catalogue_url', 'size': {'$sum': '$resources.size'}, 'counter': {'$sum': 1}}},
-            {'$sort': {'counter': -1}},
-            # {'$limit': 10},
-            {'$project': {'_id': 1, 'counter': {'$divide': ['$size',1024]}}}
+            { '$group': {'_id' : '$catalogue_url', 'size': {'$sum': '$resources.size'}, 'count': {'$sum': 1}}},
+            {'$sort': {'size': -1}},
+            {'$project': {'_id': 1, 'count': {'$divide': ['$size',1024]}}}
+            ])
+
+        return result
+
+
+    def GetEDDistribSize(self, conn, args, version = None, db = None, collection = None):
+        result=conn[db][collection].aggregate([
+            {'$match': {'catalogue_url': {'$nin': ['', None]},
+                'is_duplicate':{'$ne':True},
+                'extras.unpublished':{'$ne':"true"},
+                }},
+            {'$unwind': "$resources" },
+            { '$group': {'_id' : 0, 'size': {'$sum': '$resources.size'}, 'freq': {'$sum': 1}}},
+            {'$sort': {'freq': -1}},
+            {'$project': {'_id': 0, 'size': {'$divide': ['$size',1024]},'freq':1}}
+            ])
+
+        return result
+
+
+    def GetCDDistribSize(self, conn, args, version = None, db = None, collection = None):
+        result=conn[db][collection].aggregate([
+            {'$match': {'country': {'$nin': ['', None]},
+                'is_duplicate':{'$ne':True},
+                }},
+            {'$unwind': "$resources" },
+            { '$group': {'_id' : '$country', 'size': {'$sum': '$resources.size'}, 'freq': {'$sum': 1}}},
+            {'$sort': {'freq': -1}},
+            {'$project': {'_id': 1, 'size': {'$divide': ['$size',1024]},'freq':1}}
             ])
 
         return result
@@ -2601,28 +3610,114 @@ class Metrics:
 
 
     def GetCatMachineFormatFreq(self, conn, args, version = None, db = None, collection = None):
+        machine_readable=[
+            'cdf',
+            'csv',
+            'csv.zip',
+            'esri shapefile',
+            'geojson',
+            'iati',
+            'ical',
+            'ics',
+            'json',
+            'kml',
+            'kmz',
+            'netcdf',
+            'nt',
+            'ods',
+            'psv',
+            'psv.zip',
+            'rdf',
+            'rdfa',
+            'rss',
+            'shapefile',
+            'shp',
+            'shp.zip',
+            'sparql',
+            'sparql web form',
+            'tsv',
+            'ttl',
+            'wms',
+            'xlb',
+            'xls',
+            'xls.zip',
+            'xlsx',
+            'xml',
+            'xml.zip',
+            ]
+
         start_time=time.time()
 
-        # machine_readable=['CSV', 'TSV', 'JSON', 'XML', 'RDF']
-        result=conn[db][collection].aggregate([
-            # { '$match': { 'resources.0': { '$exists': True } } },
-            { '$match': { 'catalogue_url': { '$nin': ['', None] }}},
-            { '$unwind': "$resources" },
-            # { '$match': { 'resources.format': { '$in': [ 'CSV', 'TSV', 'JSON', 'XML', 'RDF' ] } }} ,
-            { '$group': { '_id': "$catalogue_url", 'resources': {'$push': '$resources.format'}, 'counter': { '$sum': 1 } } },
-            { '$sort': { 'counter': -1 } },
-            # {'$limit': 10}
-            ])
+        result=conn[db][collection].find({'catalogue_url': {'$nin': ['', None]},
+                        'is_duplicate':{'$ne':True},
+                        'extras.unpublished':{'$ne':"true"},
+                        },
+                        {'_id':0,'catalogue_url':1,'resources.format':1},
+                        )
+        # aggregate([
+        #     {'$match': {'catalogue_url': {'$nin': ['', None]},
+        #         'is_duplicate':{'$ne':True},
+        #         }},
+        #     # { '$unwind': "$resources" },
+        #     { '$group': { '_id': "$_id", 'cat':{'$addToSet':'$catalogue_url'},
+        #         'resources': {'$push': '$resources.format'}, 'freq': { '$sum': 1 } } },
+            # { '$sort': { 'freq': -1 } },
+            # ])
 
         total_freqs=[]
-        if result['ok']==1:
-            for i in range(0,len(result['result'])):
-                format_freq={'CSV':0, 'TSV':0, 'JSON':0, 'XML':0, 'RDF':0}
-                for j in range(0,len(result['result'][i]['resources'])):
-                    if str(result['result'][i]['resources'][j].encode('utf-8')).upper() in format_freq:
-                        format_freq[str(result['result'][i]['resources'][j]).upper()]+=1
+        if result.count()>0:
 
-                total_freqs.append({'_id': result['result'][i]['_id'], 'formats': format_freq})
+            country_format_freq={}
+            tot_counter={}
+            for _dd in result:
+                format_freq=0
+                # format_freq={'CSV':0, 'TSV':0, 'JSON':0, 'XML':0, 'RDF':0}
+                resource_size=0
+                if 'resources' in _dd:
+                    resource_size=len(_dd['resources'])
+                if resource_size>0:
+                    for  _res in _dd['resources']:
+                        try:
+                            if str(_res['format'].encode('utf-8')).lower() in machine_readable:
+                                # format_freq[str(result['result'][i]['resources'][j]).upper()]+=1
+                                format_freq=1
+                                break
+                        except AttributeError,e:
+                            print(e)
+
+                country_name=_dd['catalogue_url']
+                if country_name in country_format_freq:
+                    country_format_freq[country_name]+=format_freq
+                    tot_counter[country_name]+=1
+                else:
+                    country_format_freq[country_name]=format_freq
+                    tot_counter[country_name]=1
+
+                # total_freqs.append({'_id': result['result'][i]['_id'], 'freq': format_freq})
+            for cn in country_format_freq:
+                total_freqs.append({'_id':cn,'count': country_format_freq[cn],
+                    'tot_count':tot_counter[cn]})
+
+            # # machine_readable=['CSV', 'TSV', 'JSON', 'XML', 'RDF']
+            # result=conn[db][collection].aggregate([
+            #     # { '$match': { 'resources.0': { '$exists': True } } },
+            #     { '$match': { 'catalogue_url': { '$nin': ['', None] }}},
+            #     { '$unwind': "$resources" },
+            #     # { '$match': { 'resources.format': { '$in': [ 'CSV', 'TSV', 'JSON', 'XML', 'RDF' ] } }} ,
+            #     { '$group': { '_id': "$catalogue_url", 'resources': {'$push': '$resources.format'}, 'counter': { '$sum': 1 } } },
+            #     { '$sort': { 'counter': -1 } },
+            #     # {'$limit': 10}
+            #     ])
+            #
+            # total_freqs=[]
+            # if result['ok']==1:
+            #     for i in range(0,len(result['result'])):
+            #         format_freq={'CSV':0, 'TSV':0, 'JSON':0, 'XML':0, 'RDF':0}
+            #         for j in range(0,len(result['result'][i]['resources'])):
+            #             if str(result['result'][i]['resources'][j].encode('utf-8')).upper() in format_freq:
+            #                 format_freq[str(result['result'][i]['resources'][j]).upper()]+=1
+            #
+            #         total_freqs.append({'_id': result['result'][i]['_id'], 'formats': format_freq})
 
             print (time.time() - start_time)
             return {'ok':1, 'result': total_freqs}
@@ -2631,11 +3726,168 @@ class Metrics:
 
 
 
+    def GetEDMachineReadFormatFreq(self, conn, args, version = None, db = None, collection = None):
+        machine_readable=[
+            'cdf',
+            'csv',
+            'csv.zip',
+            'esri shapefile',
+            'geojson',
+            'iati',
+            'ical',
+            'ics',
+            'json',
+            'kml',
+            'kmz',
+            'netcdf',
+            'nt',
+            'ods',
+            'psv',
+            'psv.zip',
+            'rdf',
+            'rdfa',
+            'rss',
+            'shapefile',
+            'shp',
+            'shp.zip',
+            'sparql',
+            'sparql web form',
+            'tsv',
+            'ttl',
+            'wms',
+            'xlb',
+            'xls',
+            'xls.zip',
+            'xlsx',
+            'xml',
+            'xml.zip',
+            ]
+
+        start_time=time.time()
+
+        result=conn[db][collection].find(
+            {'catalogue_url': {'$nin': ['', None]},
+                'is_duplicate':{'$ne':True},
+                'extras.unpublished':{'$ne':"true"},
+                },
+            {'_id':0,'catalogue_url':1,'resources.format':1},
+            )
+
+        total_freqs=[]
+        if result.count()>0:
+            format_freq=0
+            tot_counter=0
+            for _dd in result:
+                # format_freq={'CSV':0, 'TSV':0, 'JSON':0, 'XML':0, 'RDF':0}
+                resource_size=0
+                if 'resources' in _dd:
+                    resource_size=len(_dd['resources'])
+                if resource_size>0:
+                    for  _res in _dd['resources']:
+                        try:
+                            if str(_res['format'].encode('utf-8')).lower() in machine_readable:
+                                format_freq+=1
+                                break
+                        except AttributeError,e:
+                            print(e)
+                tot_counter+=1
+
+                # total_freqs.append({'_id': result['result'][i]['_id'], 'freq': format_freq})
+            total_freqs.append({'freq': format_freq/tot_counter})
+
+            print (time.time() - start_time)
+            return {'ok':1, 'result': total_freqs}
+        else:
+            return result
+
+
+    def GetCDMachineReadFormatFreq(self, conn, args, version = None, db = None, collection = None):
+        machine_readable=[
+            'cdf',
+            'csv',
+            'csv.zip',
+            'esri shapefile',
+            'geojson',
+            'iati',
+            'ical',
+            'ics',
+            'json',
+            'kml',
+            'kmz',
+            'netcdf',
+            'nt',
+            'ods',
+            'psv',
+            'psv.zip',
+            'rdf',
+            'rdfa',
+            'rss',
+            'shapefile',
+            'shp',
+            'shp.zip',
+            'sparql',
+            'sparql web form',
+            'tsv',
+            'ttl',
+            'wms',
+            'xlb',
+            'xls',
+            'xls.zip',
+            'xlsx',
+            'xml',
+            'xml.zip',
+            ]
+
+        start_time=time.time()
+
+        result=conn[db][collection].aggregate([
+            {'$match': {'country': {'$nin': ['', None]},
+                'is_duplicate':{'$ne':True},
+                'extras.unpublished':{'$ne':"true"},
+                }},
+            # { '$unwind': "$resources" },
+            { '$group': { '_id': "$_id", 'country':{'$addToSet':'$country'},
+                'resources': {'$push': '$resources.format'}, 'freq': { '$sum': 1 } } },
+            # { '$sort': { 'freq': -1 } },
+            ])
+
+        total_freqs=[]
+        if result['ok']==1:
+            country_format_freq={}
+            tot_counter={}
+            for i in range(0,len(result['result'])):
+                format_freq=0
+                # format_freq={'CSV':0, 'TSV':0, 'JSON':0, 'XML':0, 'RDF':0}
+                resource_size=len(result['result'][i]['resources'])
+                if resource_size>0:
+                    for  j in range(0,len(result['result'][i]['resources'][0])):
+                        if str(result['result'][i]['resources'][0][j].encode('utf-8')).lower() in machine_readable:
+                            # format_freq[str(result['result'][i]['resources'][j]).upper()]+=1
+                            format_freq=1
+                            break
+
+                country_name=result['result'][i]['country'][0]
+                if country_name in country_format_freq:
+                    country_format_freq[country_name]+=format_freq
+                    tot_counter[country_name]+=1
+                else:
+                    country_format_freq[country_name]=format_freq
+                    tot_counter[country_name]=1
+
+                # total_freqs.append({'_id': result['result'][i]['_id'], 'freq': format_freq})
+            for cn in country_format_freq:
+                total_freqs.append({'_id':cn,'freq': country_format_freq[cn]/tot_counter[cn]})
+
+            print (time.time() - start_time)
+            return {'ok':1, 'result': total_freqs}
+        else:
+            return result
+
+
     def GetCatMachineFormatProp(self, conn, args, version = None, db = None, collection = None):
         start_time=time.time()
 
         # total_distrbs_per_catalogue=self.GetCatDistribsFreq(conn, args,version,db,collection,False)
-
         result=conn[db][collection].aggregate([
             { '$match': { 'catalogue_url': { '$nin': ['', None] }}},
             # { '$match': { 'resources.0': { '$exists': True } } },
@@ -2710,7 +3962,6 @@ class Metrics:
 
     def GetCatMimeProp(self, conn, args, version = None, db = None, collection = None):
         # total_distrbs_per_catalogue=self.GetCatDistribsFreq(conn, args,version,db,collection,False)
-
         result=conn[db][collection].aggregate([
             {'$match': {'catalogue_url': {'$nin': ['',None]}}},
             # {'$match': {'resources.0': {'$exists': True}}},
@@ -2751,75 +4002,207 @@ class Metrics:
             return result
 
     def Getcatgeofreq(self, conn, args, version = None, db = None, collection = None):
-        EXCLUDE_COUNTRIES=re.compile('\.eu')
+        EXCLUDE_COUNTRIES=re.compile('\.eu|datahub\.io')
         result=conn[db][collection].aggregate([
-            {'$match': {'country': {'$nin': ['',None]}}},
-            {'$match': {'catalogue_url':{'$not':EXCLUDE_COUNTRIES}}},
-            {'$group': {'_id':'$country','no_catalogues':{'$addToSet':'$catalogue_url'}}},
-            {'$unwind':'$no_catalogues'},
-            {'$group': {'_id':'$_id','counter':{'$sum':1}}},
+            {'$match': {'country': {'$nin': ['',None]},
+                'catalogue_url':{'$not':EXCLUDE_COUNTRIES},
+                # 'is_duplicate':{'$ne':True},
+                # '$or':[{'is_duplicate':False},{'is_duplicate':{'$exists':False}}]
+                }},
+            # {'$match': {'catalogue_url':{'$not':EXCLUDE_COUNTRIES}}},
+            {'$group': {'_id':'$country','cat_urls':{'$addToSet':'$catalogue_url'}}},
+            {'$unwind':'$cat_urls'},
+            {'$group': {'_id':'$_id','counter':{'$sum':1},'catalogues':{'$addToSet':'$cat_urls'}}},
             {'$sort':{'counter':-1}}
             ])
 
         return result
 
     def Getcatcapitafreq(self, conn, args, countryStats, version = None, db = None, collection = None):
-        EXCLUDE_COUNTRIES=re.compile('\.eu')
+        EXCLUDE_COUNTRIES=re.compile('\.eu|datahub\.io')
         results=conn[db][collection].aggregate([
             {'$match': {'country': {'$nin': ['',None]}}},
-            {'$match': {'catalogue_url':{'$not':EXCLUDE_COUNTRIES}}},
-            {'$group': {'_id':'$country','no_catalogues':{'$addToSet':'$catalogue_url'}}},
-            {'$unwind':'$no_catalogues'},
-            {'$group': {'_id':'$_id','counter':{'$sum':1}}},
-            {'$sort':{'counter':-1}}
-            ])
+            {'$match': {'catalogue_url':{'$not':EXCLUDE_COUNTRIES},
+                '$or':[{'extras.date_released':{'$type':9}},{'extras.date_updated':{'$type':9}}],
+                }},
+            {'$group': {'_id':'$catalogue_url','country':{'$addToSet':'$country'},
+                'date_release':{'$push':'$extras.date_released'},'date_update':{'$push':'$extras.date_updated'}}},
+            # {'$group': {'_id':'$country','catalogues':{'$addToSet':'$catalogue_url'}}},
+            # {'$unwind':'$catalogues'},
+            # {'$group': {'_id':'$_id','counter':{'$sum':1}}},
+            # {'$sort':{'counter':-1}}
+         ])
 
         if results['ok']==1:
-            total_freq=[]
+            # total_freq=[]
+            datedict=dict()
+            countrydict = defaultdict(list)
+            min_val=1
+            max_val=0
+            min_date=date.today().timetuple().tm_year
             for result in results['result']:
+                dates1=[x for x in result['date_release'] if isinstance(x,date)]
+                dates2=[x for x in result['date_update'] if isinstance(x,date)]
+                dates=dates1 \
+                        if len(dates1) >= len(dates2) \
+                        else dates2
+
+                years=[t.year for t in dates]
+                years=self.__reject_outliers(numpy.array(years),m=2)
+                years=years.tolist()
+                years.sort(key=int)
+
+                if years:
+                    cat_date=None
+                    dates.sort()
+                    for j in dates:
+                        if j.year==years[0]:
+                            cat_date=j.year
+                            if min_date > j.year:
+                                min_date=j.year
+
+                    countrydict[result['country'][0]].append(cat_date)
+
+            for key,val in countrydict.iteritems():
                 try:
-                    if countryStats[result['_id']]['population']!=0:
-                        total_freq.append({'country':result['_id'],'freq':result['counter']/(countryStats[result['_id']]['population']*1.00)})
-                    else:
-                        print('no population for country: %s' % result['_id'])
+                    print(key,val)
+                    # print(min_date)
+                    for dt_key,pop_val in countryStats[key]['population'].iteritems():
+                        if min_date > int(dt_key):
+                            continue
+                        if dt_key not in datedict.keys():
+                            datedict[dt_key]=dict()
+                        curr_val=(sum(x<=int(dt_key) for x in val))/(pop_val*1.00)
+                        datedict[dt_key][key]=curr_val
+                        if min_val > curr_val:
+                            min_val = curr_val
+                        elif max_val < curr_val:
+                            max_val = curr_val
+
+                # try:
+                #     for _dt in countryStats[result['_id']]['population']:
+                #         if _dt not in datedict:
+                #             datedict[_dt]=dict()
+                #         curr_val=result['counter']/(countryStats[result['_id']]['population'][_dt]*1.00)
+                #         datedict[_dt][result['_id']]=curr_val
+                #         if min_val > curr_val:
+                #             min_val = curr_val
+                #         elif max_val < curr_val:
+                #             max_val = curr_val
+
+                    # if countryStats[result['_id']]['population']!=0:
+                    #     total_freq.append({'country':result['_id'],
+                    #         'freq':result['counter']/(countryStats[result['_id']]['population']*1.00)})
+                    # else:
+                    #     print('no population for country: %s' % result['_id'])
                 except KeyError as e:
                     print('No country in db with country_code %s' % result['_id'])
 
-            return {'ok':1,'result':total_freq}
+            total=[]
+            sorted_datedict=(sorted(datedict.items(),key=operator.itemgetter(0)))
+            sorted_datedict.reverse()
+            for _dt in sorted_datedict:
+                dictlist = []
+                for key,value in _dt[1].iteritems():
+                    # dictlist.append(value)
+                    _dt[1][key]=self.__normalize_values(value,min_val,max_val,0,100)
+                total.append({'year':_dt[0],'perCapita':_dt[1]})
+
+            return {'ok':1,'result':total}
         else:
             return results
 
 
     def Getcatgdpcorr(self, conn, args, countryStats, version = None, db = None, collection = None):
-        EXCLUDE_COUNTRIES=re.compile('\.eu')
+        EXCLUDE_COUNTRIES=re.compile('\.eu|datahub\.io')
         results=conn[db][collection].aggregate([
             {'$match': {'country': {'$nin': ['',None]}}},
-            {'$match': {'catalogue_url':{'$not':EXCLUDE_COUNTRIES}}},
-            {'$group': {'_id':'$country','no_catalogues':{'$addToSet':'$catalogue_url'}}},
-            {'$unwind':'$no_catalogues'},
-            {'$group': {'_id':'$_id','counter':{'$sum':1}}},
-            {'$sort':{'counter':-1}}
-            ])
+            {'$match': {'catalogue_url':{'$not':EXCLUDE_COUNTRIES},
+                '$or':[{'extras.date_released':{'$type':9}},{'extras.date_updated':{'$type':9}}],
+                }},
+            {'$group': {'_id':'$catalogue_url','country':{'$addToSet':'$country'},
+                'date_release':{'$push':'$extras.date_released'},'date_update':{'$push':'$extras.date_updated'}}},
+            # {'$group': {'_id':'$country','no_catalogues':{'$addToSet':'$catalogue_url'}}},
+            # {'$unwind':'$no_catalogues'},
+            # {'$group': {'_id':'$_id','counter':{'$sum':1}}},
+            # {'$sort':{'counter':-1}}
+        ])
 
         if results['ok']==1:
-            total_freq=[]
+            # total_freq=[]
+            # datedict={}
+            countrydict = defaultdict(list)
+            min_date=date.today().timetuple().tm_year
             for result in results['result']:
+                dates1=[x for x in result['date_release'] if isinstance(x,date)]
+                dates2=[x for x in result['date_update'] if isinstance(x,date)]
+                dates=dates1 \
+                        if len(dates1) >= len(dates2) \
+                        else dates2
+
+                years=[t.year for t in dates]
+                years=self.__reject_outliers(numpy.array(years),m=2)
+                years=years.tolist()
+                years.sort(key=int)
+
+                if years:
+                    cat_date=None
+                    dates.sort()
+                    for j in dates:
+                        if j.year==years[0]:
+                            cat_date=j.year
+                            if min_date > j.year:
+                                min_date=j.year
+
+                    countrydict[result['country'][0]].append(cat_date)
+
+            catalogues_evolve=defaultdict(list)
+            gdp_evolve=defaultdict(list)
+            for key,val in countrydict.iteritems():
                 try:
-                    if countryStats[result['_id']]['GDP']!=0:
-                        total_freq.append({'country':result['_id'],'freq':result['counter']/(countryStats[result['_id']]['GDP']*1.00)})
-                    else:
-                        print('no GDP value for country: %s' % result['_id'])
+                    print(key,val)
+                    # print(min_date)
+                    for gdp_key,gdp_value in countryStats[key]['GDP'].iteritems():
+                        if min_date > int(gdp_key):
+                            continue
+                        # if dt_key not in datedict.keys():
+                        #     datedict[dt_key]=dict()
+                        curr_val=sum(x<=int(gdp_key) for x in val)
+                        catalogues_evolve[key].append(curr_val)
+                        gdp_evolve[key].append(gdp_value)
+
+                # try:
+                #     for _dt in countryStats[result['_id']]['GDP']:
+                #         if _dt not in datedict:
+                #             datedict[_dt]=dict()
+                #         datedict[_dt][result['_id']]=result['counter']/(countryStats[result['_id']]['GDP'][_dt]*1.00)
+                #
+                #     # if countryStats[result['_id']]['GDP']!=0:
+                #     #     total_freq.append({'country':result['_id'],
+                #     #         'freq':result['counter']/(countryStats[result['_id']]['GDP']*1.00)})
+                #     # else:
+                #     #     print('no GDP value for country: %s' % result['_id'])
                 except KeyError as e:
                     print('No country in db with country_code %s' % result['_id'])
 
+            rp=[]
+            for country in catalogues_evolve:
+                (r,p) = pearsonr(catalogues_evolve[country],gdp_evolve[country])
+                rp.append({country:{'r':r,'p':p}})
 
-            return {'ok':1,'result':total_freq}
+            # total=[]
+            # sorted_datedict=(sorted(datedict.items(),key=operator.itemgetter(0)))
+            # sorted_datedict.reverse()
+            # for _dt in sorted_datedict:
+            #     total.append({'year':_dt[0],'corr':_dt[1]})
+
+            return {'ok':1,'result':rp}
         else:
             return results
 
 
     def Getcathdicorr(self, conn, args, countryStats, version = None, db = None, collection = None):
-        EXCLUDE_COUNTRIES=re.compile('\.eu')
+        EXCLUDE_COUNTRIES=re.compile('\.eu|datahub\.io')
         results=conn[db][collection].aggregate([
             {'$match': {'country': {'$nin': ['',None]}}},
             {'$match': {'catalogue_url':{'$not':EXCLUDE_COUNTRIES}}},
@@ -2830,17 +4213,29 @@ class Metrics:
             ])
 
         if results['ok']==1:
-            total_freq=[]
+            datedict={}
             for result in results['result']:
                 try:
-                    if countryStats[result['_id']]['HDI']!=0:
-                        total_freq.append({'country':result['_id'],'freq':result['counter']/(countryStats[result['_id']]['HDI']*1.00)})
-                    else:
-                        print('no HDI value for country: %s' % result['_id'])
+                    for _dt in countryStats[result['_id']]['HDI']:
+                        if _dt not in datedict:
+                            datedict[_dt]=dict()
+                        datedict[_dt][result['_id']]=result['counter']/(countryStats[result['_id']]['HDI'][_dt]*1.00)
+
+                    # if countryStats[result['_id']]['HDI']!=0:
+                    #     total_freq.append({'country':result['_id'],
+                    #         'freq':result['counter']/(countryStats[result['_id']]['HDI']*1.00)})
+                    # else:
+                    #     print('no HDI value for country: %s' % result['_id'])
                 except KeyError as e:
                     print('No country in db with country_code %s' % result['_id'])
 
-            return {'ok':1,'result':total_freq}
+            total=[]
+            sorted_datedict=(sorted(datedict.items(),key=operator.itemgetter(0)))
+            sorted_datedict.reverse()
+            for _dt in sorted_datedict:
+                total.append({'year':_dt[0],'corr':_dt[1]})
+
+            return {'ok':1,'result':total}
         else:
             return results
 
@@ -2854,7 +4249,8 @@ class Metrics:
 
         result=conn[db][collection].aggregate([
              {'$match':{'organization.title':{'$nin':['',None]}}},
-             {'$group':{'_id':'$organization.title', 'count':{'$sum':1},'description':{'$addToSet':'$organization.description'}}},
+             {'$group':{'_id':'$organization.title', 'count':{'$sum':1},
+                 'description':{'$addToSet':'$organization.description'}}},
              {'$unwind':'$description'},
              {'$group':{'_id':'$count','organizations':{'$addToSet':'$_id'},'description':{'$push':'$description'}}},
              {'$sort':{'_id':-1}},
@@ -2888,11 +4284,27 @@ class Metrics:
 
 
     def Getcategories(self, conn, args, version = None, db = None, collection = None):
-        result=conn[db][collection].aggregate([
-            {'$unwind':'$category' },
-            {'$group':{'_id':'$catalogue_url', 'themes':{'$push':'$category'},'counter':{'$sum':1}}},
-            {'$sort':{'counter':-1}}
+        # EXCLUDE_COUNTRIES=re.compile('\.eu|datahub\.io')
+        try:
+            result=conn[db][collection].aggregate([
+                {'$match': {'catalogue_url': {'$nin': ['', None]},
+                    'is_duplicate':{'$ne':True},
+                    'extras.unpublished':{'$ne':"true"},
+                    # 'catalogue_url':{'$not':EXCLUDE_COUNTRIES}}
+                    'catalogue_url':{'$nin':[
+                        'https://www.dati.lombardia.it'
+                        # ,'https://opendata.bristol.gov.uk'
+                        ,'https://gavaobert.gavaciutat.cat'
+                        # ,'http://portal.openbelgium.be/'
+                        ,'https://data.eindhoven.nl'
+                    ]}
+                }},
+                {'$unwind':'$category' },
+                {'$group':{'_id':'$catalogue_url', 'themes':{'$push':'$category'},'count':{'$sum':1}}},
+                {'$sort':{'count':-1}}
             ])
+        except OperationFailure as e:
+            return e.details
 
         if result['ok']==1:
             total_freq=[]
@@ -2932,37 +4344,37 @@ class Metrics:
 
         odm_id=None
         counter=1
-        criteria = {}
+        criteria = {'$or':[{'is_duplicate':False},{'is_duplicate':{'$exists':False}}]}
+        # criteria = {'is_duplicate':False,'is_duplicate':{'$exists':False}}
         if 'odm_id' in args:
-            criteria={'id':args['odm_id'][0]}
+            criteria['id']=args['odm_id'][0]
             skip=0
         else:
             counter=conn[db][collection].find().count()
 
         populate_fields = [
-                'title','notes',
-                'tags',
-                'organization.title',
-                'author','author_email','maintainer_email',
-                'license_id',
-                'resources',
-                'extras.language',
-                'extras.date_released','extras.date_updated','extras.update_frequency',
-                'category',
-                'url',
-               ]
+            'title','notes',
+            'tags',
+            'organization.title',
+            'author','author_email','maintainer_email',
+            'license_id',
+            'resources',
+            'extras.language',
+            'extras.date_released','extras.date_updated','extras.update_frequency',
+            'category',
+            'url',
+        ]
         no_fields = len(populate_fields)
-
 
         result = conn[db][collection].find(spec=criteria, limit=batch_size, skip=skip, sort=[('_id',1)])
 
         total_res=[]
         for dataset in result:
-
-            res=dict((k,v) for k,v in dataset.iteritems() if (isinstance(v,list) and len(v)>0) or (not isinstance(v,list) and v not in [None,'','null']))
+            res=dict((k,v) for k,v in dataset.iteritems()
+                    if (isinstance(v,list) and len(v)>0) or (not isinstance(v,list) and v not in [None,'','null']))
             res=list(set(populate_fields).difference(res.keys()))
             # res=list(set(populate_fields).intersection(res.keys()))
-            total_res.append({'_id':dataset['id'],'fields':res,'size':no_fields - len(res)})
+            total_res.append({'_id':dataset['id'],'fields':res,'not_populated':no_fields - len(res)})
 
         return {'ok':1,'result':total_res, 'counter':counter}
 
@@ -2986,7 +4398,8 @@ class Metrics:
 
         odm_id=None
         counter=1
-        match={'resources.0':{'$exists':True}}
+        match={'resources.0':{'$exists':True},
+                '$or':[{'is_duplicate':False},{'is_duplicate':{'$exists':False}}]}
         if 'odm_id' in args:
             odm_id=args['odm_id'][0]
             match['id']=args['odm_id'][0]
@@ -3003,17 +4416,19 @@ class Metrics:
             {'$group':{'_id':'$_id','size':{'$sum':'$resources.size'},'odm_id':{'$addToSet':'$id'}}},
             {'$unwind':'$odm_id'},
             {'$project':{'_id':'$odm_id','size':{'$divide': ['$size',1024]}}}
-            ])
+        ])
 
         if result['ok']==1:
-            return {'ok':1,'result':result['result'],'counter':counter}
+            return {'ok':1,'result':result['result'],'datasets':counter}
         else:
             return result
 
 
     def Getcatlangs(self, conn, args, version = None, db = None, collection = None):
         result=conn[db][collection].aggregate([
-            {'$match':{'extras.language':{'$nin':['',None]}}},
+            {'$match':{'extras.language':{'$nin':['',None]},
+                # '$or':[{'is_duplicate':False},{'is_duplicate':{'$exists':False}}]
+                }},
             {'$group': {'_id':'$catalogue_url','languages':{'$push':'$extras.language'},'counter':{'$sum':1}}},
             {'$sort':{'counter':-1}},
             ])
@@ -3212,9 +4627,9 @@ class Metrics:
             ])
 
         if result['ok']==1:
-            codes_freq=0
             del_list=[]
             for metadata in range(0,len(result['result'])):
+                codes_freq=0
                 if len(result['result'][metadata]['status_codes'])>0:
                     for status_code in result['result'][metadata]['status_codes']:
                         if status_code>=400:
@@ -3238,38 +4653,51 @@ class Metrics:
 
     def Getcatuniqprop(self, conn, args, version = None, db = None, collection = None):
         result=conn[db][collection].aggregate([
+            {'$match':{'catalogue_url':{'$nin':['',None]}}},
             {'$unwind':'$resources'},
-            {'$group' :{'_id':'$catalogue_url','checksums':{'$push':'$resources.file_hash'},'counter':{'$sum':1}}},
-            {'$sort':{'counter':-1}}
-            ])
-
+            {'$group': {'_id':'$catalogue_url',
+                'freq': {'$sum': { '$cond': [ {'$or':[{ '$ne': [ "$is_duplicate", True] },
+                    ]} , 1, 0 ] }},
+                'counter': {'$sum': 1}}},
+            {'$sort':{'counter':-1}},
+        ])
+        # result=conn[db][collection].aggregate([
+        #     {'$unwind':'$resources'},
+        #     {'$group' :{'_id':'$catalogue_url','checksums':{'$push':'$resources.file_hash'},'counter':{'$sum':1}}},
+        #     {'$sort':{'counter':-1}}
+        #     ])
+        #
         if result['ok']==1:
-            ix_checksums=defaultdict(list)
+            # ix_checksums=defaultdict(list)
+            # for metadata in range(0,len(result['result'])):
+            #     if len(result['result'][metadata]['checksums'])>0:
+            #         for checksum in result['result'][metadata]['checksums']:
+            #             if checksum not in ['',None]:
+            #                 try:
+            #                     ix_checksums[checksum].index(result['result'][metadata]['_id'])
+            #                 except ValueError:
+            #                     ix_checksums[checksum].append(result['result'][metadata]['_id'])
+
+            # del_list=[]
             for metadata in range(0,len(result['result'])):
-                if len(result['result'][metadata]['checksums'])>0:
-                    for checksum in result['result'][metadata]['checksums']:
-                        if checksum not in ['',None]:
-                            try:
-                                ix_checksums[checksum].index(result['result'][metadata]['_id'])
-                            except ValueError:
-                                ix_checksums[checksum].append(result['result'][metadata]['_id'])
-
-            del_list=[]
-            for metadata in range(0,len(result['result'])):
-                dublicates=0
-                if len(result['result'][metadata]['checksums'])>0:
-                    for ix in result['result'][metadata]['checksums']:
-                        if len(ix_checksums[ix])>1:
-                            dublicates+=1
-
-                    result['result'][metadata]['freq']=result['result'][metadata]['counter']-dublicates
-                    result['result'][metadata]['prop']=((result['result'][metadata]['counter']-dublicates)*100.00)/result['result'][metadata]['counter']
-                    del result['result'][metadata]['checksums']
-                else:
-                    del_list.append(metadata)
-
-            for i in reversed(del_list):
-                del result['result'][i]
+            #     dublicates=0
+            #     if len(result['result'][metadata]['checksums'])>0:
+            #         for ix in result['result'][metadata]['checksums']:
+            #             if len(ix_checksums[ix])>1:
+            #                 dublicates+=1
+            #
+            #         result['result'][metadata]['freq']=result['result'][metadata]['counter']-dublicates
+            #         result['result'][metadata]['prop']=((result['result'][metadata]['counter']-dublicates)*100.00)/result['result'][metadata]['counter']
+            #         del result['result'][metadata]['checksums']
+            #     else:
+            #         del_list.append(metadata)
+            #
+            # for i in reversed(del_list):
+            #     del result['result'][i]
+                result['result'][metadata]['prop']=(
+                    (result['result'][metadata]['freq'])*100.00) \
+                    /result['result'][metadata]['counter']
+                del result['result'][metadata]['counter']
 
             return {'ok':1,'result':result['result']}
         else:
@@ -3278,38 +4706,50 @@ class Metrics:
 
     def Getcatduplprop(self, conn, args, version = None, db = None, collection = None):
         result=conn[db][collection].aggregate([
+            {'$match':{'catalogue_url':{'$nin':['',None]}}},
             {'$unwind':'$resources'},
-            {'$group' :{'_id':'$catalogue_url','checksums':{'$push':'$resources.file_hash'},'counter':{'$sum':1}}},
-            {'$sort':{'counter':-1}}
-            ])
+            {'$group': {'_id':'$catalogue_url',
+                'freq': {'$sum': { '$cond': [ { '$eq': [ "$is_duplicate", True] } , 1, 0 ] }},
+                'counter': {'$sum': 1}}},
+            {'$sort':{'counter':-1}},
+        ])
+        # result=conn[db][collection].aggregate([
+        #     {'$unwind':'$resources'},
+        #     {'$group' :{'_id':'$catalogue_url','checksums':{'$push':'$resources.file_hash'},'counter':{'$sum':1}}},
+        #     {'$sort':{'counter':-1}}
+        #     ])
 
         if result['ok']==1:
-            ix_checksums=defaultdict(list)
+            # ix_checksums=defaultdict(list)
+            # for metadata in range(0,len(result['result'])):
+            #     if len(result['result'][metadata]['checksums'])>0:
+            #         for checksum in result['result'][metadata]['checksums']:
+            #             if checksum not in ['',None]:
+            #                 try:
+            #                     ix_checksums[checksum].index(result['result'][metadata]['_id'])
+            #                 except ValueError:
+            #                     ix_checksums[checksum].append(result['result'][metadata]['_id'])
+
+            # del_list=[]
             for metadata in range(0,len(result['result'])):
-                if len(result['result'][metadata]['checksums'])>0:
-                    for checksum in result['result'][metadata]['checksums']:
-                        if checksum not in ['',None]:
-                            try:
-                                ix_checksums[checksum].index(result['result'][metadata]['_id'])
-                            except ValueError:
-                                ix_checksums[checksum].append(result['result'][metadata]['_id'])
-
-            del_list=[]
-            for metadata in range(0,len(result['result'])):
-                dublicates=0
-                if len(result['result'][metadata]['checksums'])>0:
-                    for ix in result['result'][metadata]['checksums']:
-                        if len(ix_checksums[ix])>1:
-                            dublicates+=1
-
-                    result['result'][metadata]['freq']=dublicates
-                    result['result'][metadata]['prop']=(dublicates*100.00)/result['result'][metadata]['counter']
-                    del result['result'][metadata]['checksums']
-                else:
-                    del_list.append(metadata)
-
-            for i in reversed(del_list):
-                del result['result'][i]
+            #     dublicates=0
+            #     if len(result['result'][metadata]['checksums'])>0:
+            #         for ix in result['result'][metadata]['checksums']:
+            #             if len(ix_checksums[ix])>1:
+            #                 dublicates+=1
+            #
+            #         result['result'][metadata]['freq']=dublicates
+            #         result['result'][metadata]['prop']=(dublicates*100.00)/result['result'][metadata]['counter']
+            #         del result['result'][metadata]['checksums']
+            #     else:
+            #         del_list.append(metadata)
+            #
+            # for i in reversed(del_list):
+            #     del result['result'][i]
+                result['result'][metadata]['prop']=(
+                    (result['result'][metadata]['freq'])*100.00) \
+                    /result['result'][metadata]['counter']
+                del result['result'][metadata]['counter']
 
             return {'ok':1,'result':result['result']}
         else:
@@ -3317,16 +4757,17 @@ class Metrics:
 
 
     def Getcatcountrynewmonthfreq(self, conn, args, version = None, db = None, collection = None):
-        # match={'$and':[{'extras.date_released':{'$type':9}}]}
-        end_date=datetime.now()
+        match={'catalogue_url':{'$nin':['',None]},'$and':[{'extras.date_released':{'$type':9}}]}
+        # end_date=datetime.now()
+        end_date = None
         if "end_date" in args:
             try:
                 end_date=datetime.strptime(args['end_date'][0], '%Y-%m-%d')
                 # match['$and'].append({'extras.date_released':{'$lte':end_date}})
             except ValueError as e:
                 print (e)
-
-        start_date=end_date + relativedelta(years=-1)
+        # start_date=end_date + relativedelta(years=-1)
+        start_date = None
         if "start_date" in args:
             try:
                 start_date=datetime.strptime(args['start_date'][0], '%Y-%m-%d')
@@ -3335,26 +4776,44 @@ class Metrics:
                 print (e)
 
         result=conn[db][collection].aggregate([
-            {'$match': {'catalogue_url':{'$nin':['',None]}}},
-            {'$match': {'extras.date_released':{'$type':9}}},
+            # {'$match': {'catalogue_url':{'$nin':['',None]},'extras.date_released':{'$type':9}}},
+            {'$match': match},
             {'$group': {
                 '_id' : '$catalogue_url',
                 'dates': {'$push': '$extras.date_released'},
                 'country':{'$addToSet':'$country'},
                 'counter': {'$sum': 1}}},
+            # {'$group': { '_id': {'year':{'$year':'$extras.date_released'},'month':{'$month':'$extras.date_released'}},
+            #         'catalogues':{'$push':'$catalogue_url'}, 'counter': {'$sum': 1}}},
+            # {'$sort':{'_id.year':-1,'_id.month':-1}}
             # {'$sort': { 'counter':-1}},
             ])
 
-        then = datetime(1970,1,1)
+        # then = datetime(1970,1,1)
+            # for i in range(0,len(result['result'])):
+            #     cat_dict={}
+            #     for cat in result['result'][i]['catalogues']:
+            #         try:
+            #             cat_dict[cat]+=1
+            #         except KeyError:
+            #             cat_dict[cat]=1
+            #
+            #     result['result'][i]['catalogues']=cat_dict
+            #     result['result'][i]['date']=str(date(result['result'][i]['_id']['year']
+            #             ,result['result'][i]['_id']['month'],1))
+            #     del result['result'][i]['counter']
+            #     del result['result'][i]['_id']
+
         if result['ok']==1:
             date_catalogues=[]
             d=defaultdict(list)
+            end_date_in_data = date.today()
+            start_date_in_data = date.today()
             for i in range(0,len(result['result'])):
                 dates=result['result'][i]['dates']
-
                 # find outliers with timedelta
                 # dates=[(t-then).total_seconds() for t in dates]
-                # dates=self.reject_outliers(numpy.array(dates),m=1)
+                # dates=self.__reject_outliers(numpy.array(dates),m=1)
                 # dates=dates.tolist()
                 # if dates:
                 #     cat_dates=[]
@@ -3364,7 +4823,7 @@ class Metrics:
 
                 # find outliers with years
                 years=[t.year for t in dates]
-                years=self.reject_outliers(numpy.array(years),m=1)
+                years=self.__reject_outliers(numpy.array(years),m=1)
                 years=years.tolist()
                 years.sort(key=int)
 
@@ -3373,16 +4832,30 @@ class Metrics:
                     dates.sort()
                     for j in dates:
                         if j.year==years[0]:
-                            cat_date=j
+                            # cat_date=j
+                            cat_date = date(j.year,j.month,1)
                             break
 
                     if len(result['result'][i]['country'])==1:
-                        d[date(cat_date.year,cat_date.month,1)].append([result['result'][i]['country'][0],result['result'][i]['_id']])
+                        d[date(cat_date.year,cat_date.month,1)].append([result['result'][i]['country'][0],
+                            result['result'][i]['_id']])
                     else:
                         d[date(cat_date.year,cat_date.month,1)].append(['Unkown',result['result'][i]['_id']])
 
-            i=date(end_date.year,end_date.month,1)
-            while i > date(start_date.year,start_date.month,1):
+                    if end_date == None and end_date_in_data < cat_date:
+                        end_date_in_data = cat_date
+                    if start_date == None and start_date_in_data > cat_date:
+                        start_date_in_data = cat_date
+
+            if end_date == None:
+                i = date(end_date_in_data.year,end_date_in_data.month,1)
+            else:
+                i=date(end_date.year,end_date.month,1)
+            if start_date == None:
+                term_cond = date(start_date_in_data.year,start_date_in_data.month,1)
+            else:
+                term_cond = date(start_date.year,start_date.month,start_date.day)
+            while i >= term_cond:
                 if len(d[i])>0:
                     percountry=defaultdict(list)
                     for j in d[i]:
@@ -3400,26 +4873,255 @@ class Metrics:
 
     def Getcatsitepagerank(self, conn, args, version = None, db = None, collection = None):
         result=conn[db][collection].aggregate([
-             {'$group':{'_id':'$catalogue_url', 'pagerank':{'$addToSet':'$pagerank'}}},
+             # {'$group':{'_id':'$catalogue_url', 'pagerank':{'$addToSet':'$pagerank'}}},
+             {'$group':{'_id':'$cat_url', 'pagerank':{'$addToSet':
+                 {'GooglePageRank':
+                     {'$cond':[{'$gte':['$pagerank.GooglePageRank',0]},'$pagerank.GooglePageRank',-1]},
+                     'AlexaTrafficRank':
+                     {'$cond':[{'$gte':['$pagerank.AlexaTrafficRank',0]},'$pagerank.AlexaTrafficRank',-1]}
+                     }}},
+                 },
             ])
 
         return result
 
 
 
+    def GetEDCoreMetadataFreq(self, conn, args, version = None, db = None, collection = None):
+        start_time=time.time()
+
+        result=conn[db][collection].find(
+            # {'$match': {'catalogue_url': {'$nin': ['', None]},
+            {'catalogue_url': {'$nin': ['', None]},
+                'is_duplicate':{'$ne':True},
+                'extras.unpublished':{'$ne':"true"},
+                },
+            {'_id':0,'license_id':1,'author':1,'maintainer':1,
+                'extras.date_released':1,'extras.date_updated':1,
+                # 'catalogue_url':1,
+                'organization.title':1,
+                }
+            )
+
+        if result.count()>0:
+            log_op='and'
+            if 'logical_op' in args and args['logical_op'][0] in ['and','or']:
+                log_op = args['logical_op'][0]
+
+            total=[]
+            tot_count=0
+            complete_meta_count=0
+            for dd in result:
+                tot_count+=1
+
+                if log_op=='and':
+                        if ( ('license_id' in dd and dd['license_id'] not in ['',None]) ):
+                            complete_meta_count+=0.25
+                        if ( ('author' in dd and dd['author'] not in ['',None])
+                                    # or ('author_email' in dd and dd['author_email'] not in ['',None])
+                                    or ('maintainer' in dd and dd['maintainer'] not in ['',None])
+                                    # or ('maintainer_email' in dd and dd['maintainer_email'] not in ['',None])
+                                    ):
+                            complete_meta_count+=0.25
+                        if ('organization' in dd and dd['organization'] is not None
+                                and 'title' in dd['organization'] and dd['organization']['title'] not in ['',None]):
+                            complete_meta_count+=0.25
+                        if ( 'extras' in dd and (('date_released' in dd['extras'] and dd['extras']['date_released'] not in ['',None])
+                                or ('date_updated' in dd['extras'] and dd['extras']['date_updated'] not in ['',None]))
+                                ):
+                            complete_meta_count+=0.25
+                else:
+                    if ( ('license_id' in dd and dd['license_id'] not in ['',None])
+                        or ( ('author' in dd and dd['author'] not in ['',None])
+                                # or ('author_email' in dd and dd['author_email'] not in ['',None])
+                                or ('maintainer' in dd and dd['maintainer'] not in ['',None])
+                                # or ('maintainer_email' in dd and dd['maintainer_email'] not in ['',None])
+                                )
+                        or ('organization' in dd and dd['organization'] is not None and 'title' in dd['organization'] and dd['organization']['title'] not in ['',None])
+                        or ( 'extras' in dd and (('date_released' in dd['extras'] and dd['extras']['date_released'] not in ['',None])
+                            or ('date_updated' in dd['extras'] and dd['extras']['date_updated'] not in ['',None])) )
+                    ):
+                        complete_meta_count+=1
+
+            # print(tot_count)
+            total.append({'freq': complete_meta_count/tot_count})
+
+            print (time.time() - start_time)
+
+            return {'ok':1, 'result': total}
+        else:
+            return result
+
+
+
+    def GetCatCoreMetadataFreq(self, conn, args, version = None, db = None, collection = None):
+        start_time=time.time()
+
+        result=conn[db][collection].find(
+            # {'$match': {'catalogue_url': {'$nin': ['', None]},
+            {'catalogue_url': {'$nin': ['', None]},
+                'is_duplicate':{'$ne':True},
+                'extras.unpublished':{'$ne':"true"},
+                },
+            {'_id':0,'license_id':1,'author':1,'maintainer':1,
+                'extras.date_released':1,'extras.date_updated':1,
+                'catalogue_url':1,
+                'organization.title':1,
+                }
+            )
+
+        if result.count()>0:
+            log_op='and'
+            if 'logical_op' in args and args['logical_op'][0] in ['and','or']:
+                log_op = args['logical_op'][0]
+
+            total=[]
+            tot_count={}
+            # catalogues=set([])
+            complete_meta_count={}
+            for dd in result:
+                # catalogues.add(dd['catalogue_url'])
+                if dd['catalogue_url'] in tot_count:
+                    tot_count[dd['catalogue_url']]+=1
+                else:
+                    tot_count[dd['catalogue_url']]=1
+
+                if dd['catalogue_url'] not in complete_meta_count:
+                    complete_meta_count[dd['catalogue_url']]=0
+
+                if log_op=='and':
+                    # if ( ('organization' in dd and dd['organization'] is not None) and 'extras' in dd):
+                        if ( ('license_id' in dd and dd['license_id'] not in ['',None]) ):
+                            complete_meta_count[dd['catalogue_url']]+=0.25
+                        if ( ('author' in dd and dd['author'] not in ['',None])
+                                    # or ('author_email' in dd and dd['author_email'] not in ['',None])
+                                    or ('maintainer' in dd and dd['maintainer'] not in ['',None])
+                                    # or ('maintainer_email' in dd and dd['maintainer_email'] not in ['',None])
+                                    ):
+                            complete_meta_count[dd['catalogue_url']]+=0.25
+                        if ('organization' in dd and dd['organization'] is not None
+                                and 'title' in dd['organization'] and dd['organization']['title'] not in ['',None]):
+                            complete_meta_count[dd['catalogue_url']]+=0.25
+                        if ( 'extras' in dd and (('date_released' in dd['extras'] and dd['extras']['date_released'] not in ['',None])
+                                or ('date_updated' in dd['extras'] and dd['extras']['date_updated'] not in ['',None]))
+                                ):
+                            complete_meta_count[dd['catalogue_url']]+=0.25
+                else:
+                    if ( ('license_id' in dd and dd['license_id'] not in ['',None])
+                        or ( ('author' in dd and dd['author'] not in ['',None])
+                                # or ('author_email' in dd and dd['author_email'] not in ['',None])
+                                or ('maintainer' in dd and dd['maintainer'] not in ['',None])
+                                # or ('maintainer_email' in dd and dd['maintainer_email'] not in ['',None])
+                                )
+                        or ('organization' in dd and dd['organization'] is not None and
+                            'title' in dd['organization'] and dd['organization']['title'] not in ['',None])
+                        or ( ('date_released' in dd['extras'] and dd['extras']['date_released'] not in ['',None])
+                            or ('date_updated' in dd['extras'] and dd['extras']['date_updated'] not in ['',None]) )
+                    ):
+                        if dd['catalogue_url'] in complete_meta_count:
+                            complete_meta_count[dd['catalogue_url']]+=1
+                        else:
+                            complete_meta_count[dd['catalogue_url']]=1
+
+            for i in tot_count:
+            # for i in catalogues:
+                if i in complete_meta_count:
+                    total.append({'_id':i,'count': complete_meta_count[i],'tot_count':tot_count[i]})
+                    # total.append({'_id':i,'count': complete_meta_count[i]})
+                else:
+                    # total.append({'_id':i,'freq': 0/tot_count[i]})
+                        total.append({'_id':i,'count': 0,'tot_count':tot_count[i]})
+
+            print (time.time() - start_time)
+
+            return {'ok':1, 'result': total}
+        else:
+            return result
+
+
+    def GetCatAccessabilityFreq(self, conn, args, version = None, db = None, collection = None):
+        start_time=time.time()
+
+        result=conn[db][collection].find(
+            # {'$match': {'catalogue_url': {'$nin': ['', None]},
+            {'catalogue_url': {'$nin': ['', None]},
+                'is_duplicate':{'$ne':True},
+                'extras.unpublished':{'$ne':"true"},
+                },
+            {'_id':0,'author_email':1,'maintainer_email':1,
+                'catalogue_url':1,'resources.status_code':1,
+                'notes':1
+                }
+            )
+
+        if result.count()>0:
+            result.batch_size(MongoHandler.batchSize)
+
+            total=[]
+            tot_count={}
+            accessible_count={}
+            for dd in result:
+                if dd['catalogue_url'] in tot_count:
+                    tot_count[dd['catalogue_url']]+=1
+                else:
+                    tot_count[dd['catalogue_url']]=1
+
+                if 'resources' in dd:
+                    not_broken=True
+                    for res in dd['resources']:
+                        if 'status_code' in res:
+                            if res['status_code']>=400:
+                                not_broken=False
+                            else:
+                                not_broken=True
+                                break
+                        else:
+                            not_broken=False
+
+                    if ( not_broken
+                            and ('author_email' in dd and dd['author_email']
+                                or ('maintainer_email' in dd and dd['maintainer_email'] not in ['',None]) )
+                            and ('notes' in dd and dd['notes'])
+                    ):
+                        if dd['catalogue_url'] in accessible_count:
+                            accessible_count[dd['catalogue_url']]+=1
+                        else:
+                            accessible_count[dd['catalogue_url']]=1
+
+            # print(tot_count)
+            for i in tot_count:
+                if i in accessible_count:
+                    total.append({'_id':i,'count': accessible_count[i],
+                        'tot_count':tot_count[i]})
+                else:
+                    total.append({'_id':i,'count': 0,
+                        'tot_count':tot_count[i]})
+
+            print (time.time() - start_time)
+
+            return {'ok':1, 'result': total}
+        else:
+            return result
+
+
     def Getcatsinfo(self, conn, args, version = None, db = None, collection = None,dates={}):
         result=conn[db][collection].aggregate([{'$match':dates},
             {'$project':
-            {'_id':0,'title':1,'description':1,'url':'$cat_url','source_type':'$type','language':1,'country':1,
-                'date_created':'$catalogue_date_created','date_updated':'$catalogue_date_updated',
-                'update_frequency':'$frequency'}}
+                {'_id':0,'title':1,'description':1,'url':'$cat_url',
+                    'source_type':'$type','language':1,'country':1,
+                    'date_created':'$catalogue_date_created','date_updated':'$catalogue_date_updated',
+                    'update_frequency':'$frequency',
+                    'date_harvested':1,'date_reharvested':1,'official':{'$ifNull':['$official','U']},
+                    'is_harmonized':{'$ifNull':['$available',False]},
+                    }}
             ])
 
         return result
 
 
     ## returns the number of catalogued datasets
-    def _aggregate(self, conn, args, pipeline_args, version = None, db = None, collection = None, non_empty = True, default_match = None):
+    def _aggregate(self, conn, args, pipeline_args, version = None, db = None, collection = None,
+            non_empty = True, default_match = None):
         """
         Get aggregated data
         """
@@ -3624,6 +5326,58 @@ class Metrics:
             return 'Timeliness of the dataset'
         else:
             return ''
+
+
+    def __reject_outliers(self, data, m = 2.):
+        return data[abs(data - numpy.mean(data)) < m * numpy.std(data)]
+        # d = numpy.abs(data - numpy.median(data))
+        # mdev = numpy.median(d)
+        # s = d/mdev if mdev else 0.
+        # return data[s<m]
+
+
+    def __pearson(self, prefs, p1, p2):
+        si={}
+        for item in prefs[p1]:
+            if item in prefs[p2]: si[item]=1
+
+        n=len(si)
+
+        if n==0: return 0
+
+        #regular sums
+        sum1=sum([prefs[p1][it] for it in si])
+        sum2=sum([prefs[p2][it] for it in si])
+
+        #sum of the squares
+        sum1Sq=sum([pow(prefs[p1][it],2) for it in si])
+        sum2Sq=sum([pow(prefs[p2][it],2) for it in si])
+
+        #sum of the products
+        pSum=sum([prefs[p1][it]*prefs[p2][it] for it in si])
+
+        #do pearson score
+        num=pSum-(sum1*sum2/n)
+        den=sqrt((sum1Sq-pow(sum1,2)/n)*(sum2Sq-pow(sum2,2)/n))
+        if den==0: return 0
+
+        r=num/den
+
+        return r
+
+
+    def __normalize_values(self,value,oldMin,oldMax,newMin,newMax):
+        # old_min = min(values)
+        # old_range = max(values) - old_min
+        old_min = oldMin
+        old_range = oldMax - old_min
+
+        new_min = newMin
+        new_range = newMax + 0.9999999999 - new_min
+        # output = [int((n - old_min) / old_range * new_range + new_min) for n in values]
+        output = int((value- old_min)*1.00 / old_range * new_range + new_min)
+
+        return output
 
 
 class MongoFakeStream:

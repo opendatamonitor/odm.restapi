@@ -1,3 +1,7 @@
+setuptools
+pip
 pymongo
 numpy==1.9.0
 python-dateutil
+#install libblas-dev or liblapack-dev (debian)
+scipy

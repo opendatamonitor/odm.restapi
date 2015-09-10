@@ -59,7 +59,7 @@ class MongoServer(HTTPServer):
 
 
 class MongoHTTPRequest(BaseHTTPRequestHandler):
-    db_name='odm'
+    bulk_collection = 'odm'
 
     mimetypes = { "html" : "text/html",
                   "htm" : "text/html",
@@ -90,20 +90,23 @@ class MongoHTTPRequest(BaseHTTPRequestHandler):
             return (None, None, None)
 
         if len(parts) == 1:
-            return ("admin", None, parts[0])
+            return ("admin", None, None,parts[0])
         elif len(parts) == 2:
-            return (parts[0], None, parts[1])
+            return (parts[0], None, None, parts[1])
+        elif len(parts) == 4:
+            return (parts[0],parts[1],parts[2],parts[3])
         else:
-            return (parts[0], ".".join(parts[1:-1]), parts[-1])
+            return (parts[0], None, ".".join(parts[1:-1]), parts[-1])
 
 
     def call_handler(self, uri, args):
         """ execute something """
 
-        (reserved, version, func_name) = self._parse_call(uri)
+        (reserved, collection, version, func_name) = self._parse_call(uri)
         #(db, collection, func_name) = self._parse_call(uri)
         #if db == None or func_name == None:
-        if reserved != "api" or version not in ['v1.0',MongoHTTPRequest.db_name]:
+        if reserved != "api" or version not in ['v1.0'] \
+            or collection not in [None,MongoHTTPRequest.bulk_collection]:
             self.send_error(404, 'Script Not Found: '+uri)
             return
 
@@ -121,8 +124,8 @@ class MongoHTTPRequest(BaseHTTPRequestHandler):
             else:
                 self.jsonp_callback = args.getvalue("callback")
 
-        if version == MongoHTTPRequest.db_name:
-            setattr(MongoHandler,'db_name',MongoHTTPRequest.db_name)
+        # if version == MongoHTTPRequest.db_name:
+        #     setattr(MongoHandler,'db_name',MongoHTTPRequest.db_name)
 
         func = getattr(MongoHandler.mh, func_name, None)
         if callable(func):
@@ -137,8 +140,12 @@ class MongoHTTPRequest(BaseHTTPRequestHandler):
                 func(args, self.prependJSONPCallback, name = name, version = version)
             else:
                 #func(args, self.wfile.write, name = name, db = db, collection = collection)
-                func(args, self.wfile.write, name = name, version = version)
-
+                if collection == None:
+                    func(args, self.wfile.write, name = name, version = version)
+                else:
+                    MongoHandler.mh._set_collection(collection)
+                    func(args, self.wfile.write, name = name, version = version)
+                    MongoHandler.mh._reset_collection(collection)
             return
         else:
             self.send_error(404, 'Script Not Found: '+uri)
@@ -218,11 +225,11 @@ class MongoHTTPRequest(BaseHTTPRequestHandler):
         self.call_handler(uri, args)
         #self.wfile.write( self.path )
 
-    def do_POST(self):
-        (uri, args, type) = self.process_uri("POST")
-        if uri == None:
-            return
-        self.call_handler(uri, args)
+    # def do_POST(self):
+    #     (uri, args, type) = self.process_uri("POST")
+    #     if uri == None:
+    #         return
+    #     self.call_handler(uri, args)
 
     @staticmethod
     def serve_forever(port):
