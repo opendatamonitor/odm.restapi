@@ -34,6 +34,8 @@ import operator
 # from operator import itemgetter
 from scipy.stats.stats import pearsonr
 
+#lists of predefined stuff, e.g. non-proprietary formats, machine readable
+import def_formatLists
 
 #all_functions = inspect.getmembers(module, inspect.isfunction)
 #print all_functions
@@ -1812,6 +1814,8 @@ class MongoHandler:
             "_totalNumOfCatalogue",
             "_update",
             "sm_object_hook",
+            "_reset_collection",
+            "_set_collection",
             "*__*",
         ]
         all_functions = inspect.getmembers(self.__class__, inspect.ismethod)
@@ -2264,29 +2268,8 @@ class Metrics:
     ## returns the number of datasets with Open License
     ## (list from http://opendefinition.org/licenses)
     def GetNumberOfDatasetsWithOpenLicense(self, conn, args, version = None, db = None, collection = None):
-        open_licenses=[
-            u'CC0',u'CC0-1.0',
-            u'ODC-PDDL',u'Open Data Commons Public Domain Dedication and Licence',u'PDDL',
-            u'CC BY',u'CC BY-2.5',u'CC BY-3.0',u'CC BY-3.0 AT',u'CC BY-3.0 DE',
-            u'CC BY-3.0 ES',u'CC BY-3.0 FI',u'CC BY-3.0 IT',u'CC BY-4.0',
-            u'ODC-BY',
-            u'CC BY-SA',u'CC BY-SA-1.0 FI',u'CC BY-SA-3.0 AT',u'CC BY-SA-3.0 CH',
-            u'CC BY-SA-3.0 ES',u'CC-BY-SA-4.0',
-            u'ODC-ODbL',u'ODbL',
-            u'Free Art License',u'FAL',
-            u'GFDL',u'GNU FDL',
-            u'GNU GPL-2.0',u'GNU GPL-3.0',
-            u'OGL',u'OGL-UK-2.0',u'OGL-UK-3.0 ',
-            u'Open Government Licence - Canada 2.0',u'Open Government Licence Canada 2.0',
-            u'OGL-Canada-2.0',
-            u'MirOS License',
-            u'Talis Community License',
-            u'Against DRM',
-            u'DL-DE-BY-2.0',u'Data licence Germany – attribution – version 2.0',u'Data licence Germany – Zero – version 2.0',
-            u'Design Science License',u'EFF Open Audio License',
-            u'SPL',
-            u'W3C license'
-        ]
+        open_licenses = def_formatLists.ODM_Licenses().get_open_licenses()
+
         tmp_collection='tmp_coll_openlic'
 
         start_time=time.time()
@@ -2391,29 +2374,7 @@ class Metrics:
 
 
     def GetEDOpenLicenseFreq(self, conn, args, version = None, db = None, collection = None):
-        open_licenses=[
-            u'CC0',u'CC0-1.0',
-            u'ODC-PDDL',u'Open Data Commons Public Domain Dedication and Licence',u'PDDL',
-            u'CC BY',u'CC BY-2.5',u'CC BY-3.0',u'CC BY-3.0 AT',u'CC BY-3.0 DE',
-            u'CC BY-3.0 ES',u'CC BY-3.0 FI',u'CC BY-3.0 IT',u'CC BY-4.0',
-            u'ODC-BY',
-            u'CC BY-SA',u'CC BY-SA-1.0 FI',u'CC BY-SA-3.0 AT',u'CC BY-SA-3.0 CH',
-            u'CC BY-SA-3.0 ES',u'CC-BY-SA-4.0',
-            u'ODC-ODbL',u'ODbL',
-            u'Free Art License',u'FAL',
-            u'GFDL',u'GNU FDL',
-            u'GNU GPL-2.0',u'GNU GPL-3.0',
-            u'OGL',u'OGL-UK-2.0',u'OGL-UK-3.0 ',
-            u'Open Government Licence - Canada 2.0',u'Open Government Licence Canada 2.0',
-            u'OGL-Canada-2.0',
-            u'MirOS License',
-            u'Talis Community License',
-            u'Against DRM',
-            u'DL-DE-BY-2.0',u'Data licence Germany – attribution – version 2.0',u'Data licence Germany – Zero – version 2.0',
-            u'Design Science License',u'EFF Open Audio License',
-            u'SPL',
-            u'W3C license'
-        ]
+        open_licenses = def_formatLists.ODM_Licenses().get_open_licenses()
 
         combined_version = [u'CC BY-SA',u'CC BY',u'CC0',u'GNU GPL']
 
@@ -2474,29 +2435,8 @@ class Metrics:
 
 
     def GetCDOpenLicenseFreq(self, conn, args, version = None, db = None, collection = None):
-        open_licenses=[
-            u'CC0',u'CC0-1.0',
-            u'ODC-PDDL',u'Open Data Commons Public Domain Dedication and Licence',u'PDDL',
-            u'CC BY',u'CC BY-2.5',u'CC BY-3.0',u'CC BY-3.0 AT',u'CC BY-3.0 DE',
-            u'CC BY-3.0 ES',u'CC BY-3.0 FI',u'CC BY-3.0 IT',u'CC BY-4.0',
-            u'ODC-BY',
-            u'CC BY-SA',u'CC BY-SA-1.0 FI',u'CC BY-SA-3.0 AT',u'CC BY-SA-3.0 CH',
-            u'CC BY-SA-3.0 ES',u'CC-BY-SA-4.0',
-            u'ODC-ODbL',u'ODbL',
-            u'Free Art License',u'FAL',
-            u'GFDL',u'GNU FDL',
-            u'GNU GPL-2.0',u'GNU GPL-3.0',
-            u'OGL',u'OGL-UK-2.0',u'OGL-UK-3.0 ',
-            u'Open Government Licence - Canada 2.0',u'Open Government Licence Canada 2.0',
-            u'OGL-Canada-2.0',
-            u'MirOS License',
-            u'Talis Community License',
-            u'Against DRM',
-            u'DL-DE-BY-2.0',u'Data licence Germany – attribution – version 2.0',u'Data licence Germany – Zero – version 2.0',
-            u'Design Science License',u'EFF Open Audio License',
-            u'SPL',
-            u'W3C license'
-        ]
+        open_licenses = def_formatLists.ODM_Licenses().get_open_licenses()
+
         start_time=time.time()
 
         combined_version = [u'CC BY-SA',u'CC BY',u'CC0',u'GNU GPL']
@@ -2547,24 +2487,8 @@ class Metrics:
 
     ## returns the proportion of datasets with Open License (list from http://opendefinition.org/licenses)
     def GetProportionOfDatasetsWithOpenLicense(self, conn, args, version = None, db = None, collection = None):
-        open_licenses=[
-            u'CC0',
-            u'ODC-PDDL',u'Open Data Commons Public Domain Dedication and Licence',u'PDDL',
-            u'CC BY',u'CC-BY-4.0',
-            u'ODC-BY',
-            u'CC BY-SA',u'CC-BY-SA-4.0',
-            u'ODC-ODbL',u'ODbL',
-            u'Free Art License',u'FAL',
-            u'GFDL',u'GNU FDL',
-            u'OGL',u'OGL-UK-2.0',u'OGL-UK-3.0 ',
-            u'Open Government Licence - Canada 2.0',u'Open Government Licence Canada 2.0',
-            u'OGL-Canada-2.0',
-            u'MirOS License',
-            u'Talis Community License',
-            u'Against DRM',
-            u'DL-DE-BY-2.0',u'Data licence Germany – attribution – version 2.0',u'Data licence Germany – Zero – version 2.0',
-            u'Design Science License',u'EFF Open Audio License'
-        ]
+        open_licenses = def_formatLists.ODM_Licenses().get_open_licenses()
+
         # pipeline_args = {'group': '$license_title'}
         # document=self._aggregate(conn, args, pipeline_args, version, 'odm', 'odm', False)
         #
@@ -2649,24 +2573,7 @@ class Metrics:
 
 
     def GetOpenLicenseFreqPerDate(self, conn, args, version = None, db = None, collection = None):
-        open_licenses=[
-            u'CC0',
-            u'ODC-PDDL',u'Open Data Commons Public Domain Dedication and Licence',u'PDDL',
-            u'CC BY',u'CC-BY-4.0',
-            u'ODC-BY',
-            u'CC BY-SA',u'CC-BY-SA-4.0',
-            u'ODC-ODbL',u'ODbL',
-            u'Free Art License',u'FAL',
-            u'GFDL',u'GNU FDL',
-            u'OGL',u'OGL-UK-2.0',u'OGL-UK-3.0 ',
-            u'Open Government Licence - Canada 2.0',u'Open Government Licence Canada 2.0',
-            u'OGL-Canada-2.0',
-            u'MirOS License',
-            u'Talis Community License',
-            u'Against DRM',
-            u'DL-DE-BY-2.0',u'Data licence Germany – attribution – version 2.0',u'Data licence Germany – Zero – version 2.0',
-            u'Design Science License',u'EFF Open Audio License'
-        ]
+        open_licenses = def_formatLists.ODM_Licenses().get_open_licenses()
 
         start_time=time.time()
 
@@ -2902,50 +2809,7 @@ class Metrics:
         # document=self._aggregate(conn, args, pipeline_args, version, 'odm', 'odm')
         #
         # return document
-        non_propr = [
-                'ascii',
-                'audio/mpeg',
-                'bmp',
-                'cdf',
-                'csv',
-                'csv.zip',
-                'dbf',
-                'geojson',
-                'geotiff',
-                'gzip',
-                'html',
-                'iati',
-                'ical',
-                'ics',
-                'jpeg 2000',
-                'json',
-                'kml',
-                'kmz',
-                'mpeg',
-                'netcdf',
-                'nt',
-                'ods',
-                'pdf',
-                'pdf/a',
-                'png',
-                'psv',
-                'psv.zip',
-                'rdf',
-                'rdfa',
-                'rss',
-                'rtf',
-                'sparql',
-                'sparql web form',
-                'tar',
-                'tiff',
-                'tsv',
-                'ttl',
-                'txt',
-                'wms',
-                'xml',
-                'xml.zip',
-                'zip',
-                ]
+        non_propr=def_formatLists.ODM_formats().get_non_proprietary()
 
         regex = re.compile("[.-]+ *")
 
@@ -3001,50 +2865,7 @@ class Metrics:
 
 
     def GetCatNonProprietaryFormatFreq(self, conn, args, version = None, db = None, collection = None):
-        non_propr = [
-                'ascii',
-                'audio/mpeg',
-                'bmp',
-                'cdf',
-                'csv',
-                'csv.zip',
-                'dbf',
-                'geojson',
-                'geotiff',
-                'gzip',
-                'html',
-                'iati',
-                'ical',
-                'ics',
-                'jpeg 2000',
-                'json',
-                'kml',
-                'kmz',
-                'mpeg',
-                'netcdf',
-                'nt',
-                'ods',
-                'pdf',
-                'pdf/a',
-                'png',
-                'psv',
-                'psv.zip',
-                'rdf',
-                'rdfa',
-                'rss',
-                'rtf',
-                'sparql',
-                'sparql web form',
-                'tar',
-                'tiff',
-                'tsv',
-                'ttl',
-                'txt',
-                'wms',
-                'xml',
-                'xml.zip',
-                'zip',
-                ]
+        non_propr=def_formatLists.ODM_formats().get_non_proprietary()
 
         regex = re.compile("[.-]+ *")
 
@@ -3610,41 +3431,7 @@ class Metrics:
 
 
     def GetCatMachineFormatFreq(self, conn, args, version = None, db = None, collection = None):
-        machine_readable=[
-            'cdf',
-            'csv',
-            'csv.zip',
-            'esri shapefile',
-            'geojson',
-            'iati',
-            'ical',
-            'ics',
-            'json',
-            'kml',
-            'kmz',
-            'netcdf',
-            'nt',
-            'ods',
-            'psv',
-            'psv.zip',
-            'rdf',
-            'rdfa',
-            'rss',
-            'shapefile',
-            'shp',
-            'shp.zip',
-            'sparql',
-            'sparql web form',
-            'tsv',
-            'ttl',
-            'wms',
-            'xlb',
-            'xls',
-            'xls.zip',
-            'xlsx',
-            'xml',
-            'xml.zip',
-            ]
+        machine_readable=def_formatLists.ODM_formats().get_machine_readable()
 
         start_time=time.time()
 
@@ -3727,41 +3514,7 @@ class Metrics:
 
 
     def GetEDMachineReadFormatFreq(self, conn, args, version = None, db = None, collection = None):
-        machine_readable=[
-            'cdf',
-            'csv',
-            'csv.zip',
-            'esri shapefile',
-            'geojson',
-            'iati',
-            'ical',
-            'ics',
-            'json',
-            'kml',
-            'kmz',
-            'netcdf',
-            'nt',
-            'ods',
-            'psv',
-            'psv.zip',
-            'rdf',
-            'rdfa',
-            'rss',
-            'shapefile',
-            'shp',
-            'shp.zip',
-            'sparql',
-            'sparql web form',
-            'tsv',
-            'ttl',
-            'wms',
-            'xlb',
-            'xls',
-            'xls.zip',
-            'xlsx',
-            'xml',
-            'xml.zip',
-            ]
+        machine_readable=def_formatLists.ODM_formats().get_machine_readable()
 
         start_time=time.time()
 
@@ -3802,41 +3555,7 @@ class Metrics:
 
 
     def GetCDMachineReadFormatFreq(self, conn, args, version = None, db = None, collection = None):
-        machine_readable=[
-            'cdf',
-            'csv',
-            'csv.zip',
-            'esri shapefile',
-            'geojson',
-            'iati',
-            'ical',
-            'ics',
-            'json',
-            'kml',
-            'kmz',
-            'netcdf',
-            'nt',
-            'ods',
-            'psv',
-            'psv.zip',
-            'rdf',
-            'rdfa',
-            'rss',
-            'shapefile',
-            'shp',
-            'shp.zip',
-            'sparql',
-            'sparql web form',
-            'tsv',
-            'ttl',
-            'wms',
-            'xlb',
-            'xls',
-            'xls.zip',
-            'xlsx',
-            'xml',
-            'xml.zip',
-            ]
+        machine_readable=def_formatLists.ODM_formats().get_machine_readable()
 
         start_time=time.time()
 
