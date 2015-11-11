@@ -36,6 +36,7 @@ from scipy.stats.stats import pearsonr
 
 #lists of predefined stuff, e.g. non-proprietary formats, machine readable
 import def_formatLists
+from string_diff import comp as odm_comp
 
 #all_functions = inspect.getmembers(module, inspect.isfunction)
 #print all_functions
@@ -49,6 +50,7 @@ class MongoHandler:
     mh = None
     _cursor_id = 0
     db_name = 'odm'
+    raw_collection_name = 'odm'
     collection_name = 'odm_harmonised'
     # collection_name = 'odm_harmonised_demo'
     jobs_collection_name = 'jobs'
@@ -134,7 +136,7 @@ class MongoHandler:
             return self.connections[name]
 
         try:
-            connection = Connection(uri, sockettimeoutms = 30000)
+            connection = Connection(uri, sockettimeoutms = 60000)
         except (ConnectionFailure, ConfigurationError):
             return None
 
@@ -431,6 +433,146 @@ class MongoHandler:
             self.__output_results(cursor, out, batch_size)
 
 
+    def _find_raw(self, args, out, name = None, version = None, db = None, collection = None):
+        """
+        query the database.
+        """
+        db = self.db_name
+        collection = self.raw_collection_name
+
+        if type(args).__name__ != 'dict':
+            out('{"ok" : 0, "errmsg" : "_find must be a GET request"}')
+            return
+
+        conn = self._get_connection(name)
+        if conn == None:
+            out('{"ok" : 0, "errmsg" : "couldn\'t get connection to mongo"}')
+            return
+
+        if db == None or collection == None:
+           out('{"ok" : 0, "errmsg" : "db and collection must be defined"}')
+           return
+
+        criteria = { 'deleted_dataset': { '$ne': True }}
+        # if 'criteria' in args:
+        #     criteria = self._get_son(args['criteria'][0], out)
+        #     if criteria == None:
+        #         return
+
+        if 'odm_id' in args:
+            criteria = {'id': args['odm_id'][0]}
+
+        fields = {
+                '_id':0,
+                'deleted_dataset':0,'attrs_counter':0,'copied':0,'harmonised':0,
+                # 'id':True,'title':True,'notes':True,'num_tags':True,
+                # 'tags':True,'organization.id':True,'organization.title':True,
+                # 'author':True,'author_email':True,'license_id':True,'catalogue_url':True,
+                # 'metadata_created':True,'metadata_modified':True,'num_resources':True,
+                # 'extras.language':True,
+                # 'country':True,'extras.state':True,'city':True,
+                # 'extras.date_released':True,'extras.date_updated':True,'extras.update_frequency':True,
+                # 'category':True,'sub_category':True,
+                # 'platform':True,'extras.version':True,
+                # 'resources.mimetype':True,'resources.hash':True,'resources.url':True,
+                # 'resources.size':True, 'resources.format':True,
+                # 'owner_org':True,
+                # 'ckan_url':True,'url':True,
+                # 'isopen':True,'private':True,
+                # 'is_duplicate':True,
+                }
+
+        limit = 0
+        # if 'limit' in args:
+        #     limit = int(args['limit'][0])
+
+        batch_size = 15
+        if 'batch_size' in args:
+            batch_size = int(args['batch_size'][0])
+
+        skip = 0
+        if 'offset' in args:
+            skip = int(args['offset'][0])
+            limit = batch_size
+        elif 'page' in args:
+            skip = batch_size * (int(args['page'][0])-1)
+            limit = batch_size
+
+        cat_url=None
+        if 'catalogue_url' in args:
+            criteria['catalogue_url']=args['catalogue_url'][0]
+
+        if 'attribute' in args:
+            if args['attribute'][0] in ['date_released','date_updated','metadata_created','metadata_modified']:
+                # end_date=datetime.now()
+                end_date=''
+                start_date=''
+                if "end_date" in args:
+                    try:
+                        end_date=datetime.strptime(args['end_date'][0], '%Y-%m-%d')
+                    except ValueError as e:
+                        print (e)
+
+                # start_date=end_date + relativedelta(years=-1)
+                if "start_date" in args:
+                    try:
+                        start_date=datetime.strptime(args['start_date'][0], '%Y-%m-%d')
+                    except ValueError as e:
+                        print (e)
+                if start_date or end_date:
+                    if 'metadata' in args['attribute'][0]:
+                        extras_date=args['attribute'][0]
+                    else:
+                        extras_date='extras.'+args['attribute'][0]
+                    params=[]
+                    params.append({extras_date:{'$type':9}})
+                    if start_date and end_date:
+                        params.append({extras_date:{'$gte':start_date,'$lte':end_date}})
+                    elif  start_date:
+                        params.append({extras_date:{'$gte':start_date}})
+                    else:
+                        params.append({extras_date:{'$lte':end_date}})
+                criteria['$and']=params
+
+        cursor = conn[db][collection].find(spec=criteria, fields=fields, limit=limit, skip=skip)
+
+        sort = None
+        if 'sort' in args:
+            sort = self._get_son(args['sort'][0], out)
+            if sort == None:
+                return
+
+            stupid_sort = []
+
+            for field in sort:
+                if sort[field] == -1:
+                    stupid_sort.append([field, DESCENDING])
+                else:
+                    stupid_sort.append([field, ASCENDING])
+
+            cursor.sort(stupid_sort)
+
+        if 'explain' in args and bool(args['explain'][0]):
+            out(json.dumps({"results" : [cursor.explain()], "ok" : 1}, default=json_util.default))
+
+
+        if not hasattr(self, "cursors"):
+            setattr(self, "cursors", {})
+
+        id = MongoHandler._cursor_id
+        MongoHandler._cursor_id = MongoHandler._cursor_id + 1
+
+        cursors = getattr(self, "cursors")
+        cursors[id] = cursor
+        setattr(cursor, "id", id)
+
+
+        if 'count' in args and args['count'][0].lower() in ['1','true']:
+            self.__output_raw_results(cursor, out, batch_size, conn[db][collection].find(spec=criteria, fields=fields, limit=limit, skip=skip).count())
+        else:
+            self.__output_raw_results(cursor, out, batch_size)
+
+
     def _more(self, args, out, name = None, version= None, db = None, collection = None):
         """
         Get more results from a cursor
@@ -575,6 +717,41 @@ class MongoHandler:
             out(json.dumps({"results" : list_batch, "id" : cursor.id, "ok" : 1}, default=self.__date_handler))
 
 
+    def __output_raw_results(self, cursor, out, batch_size=15, count=0):
+        """
+        Iterate through the next batch
+        """
+        batch = []
+
+        try:
+            while len(batch) < batch_size:
+                batch.append(cursor.next())
+        except AutoReconnect:
+            out(json.dumps({"ok" : 0, "errmsg" : "auto reconnecting, please try again"}))
+            return
+        except OperationFailure, of:
+            out(json.dumps({"ok" : 0, "errmsg" : "%s" % of}))
+            return
+        except StopIteration:
+            # this is so stupid, there's no has_next?
+            pass
+
+        if count:
+            out(json.dumps({"count": count, "results" : batch, "id" : cursor.id, "ok" : 1}, default=self.__date_handler))
+        else:
+            out(json.dumps({"results" : batch, "id" : cursor.id, "ok" : 1}, default=self.__date_handler))
+
+
+    def _insert(self, args, out, name = None, db = None, collection = None):
+        """
+        insert a doc
+        """
+
+        if type(args).__name__ == 'dict':
+            out('{"ok" : 0, "errmsg" : "_insert must be a POST request"}')
+            return
+
+        conn = self._get_connection(name)
     def _insert(self, args, out, name = None, db = None, collection = None):
         """
         insert a doc
@@ -2064,11 +2241,18 @@ class Metrics:
 
 
     def GetDatasetsTotFreq(self, conn, args, version = None, db = None, collection = None):
-        result=conn[db][collection].aggregate([
-            {'$match': {'catalogue_url': {'$nin': ['', None]},
-                'is_duplicate':{'$ne':True},
+        match_dict =  {'catalogue_url': {'$nin': ['', None]},
                 'extras.unpublished':{'$ne':"true"},
-                }},
+                'is_duplicate':{'$ne':True}
+                }
+
+        if 'include_dupls' in args:
+            dupl_val = args['include_dupls'][0]
+            if dupl_val.lower() in ['true','1']:
+                del match_dict['is_duplicate']
+
+        result=conn[db][collection].aggregate([
+            { '$match': match_dict },
             { '$group': { '_id': '$catalogue_url', 'count': {'$sum':1 }}},
             { '$sort': {'count':-1 }},
         ])
@@ -2233,12 +2417,20 @@ class Metrics:
         # else:
         #     return document
         #
-        result=conn[db][collection].aggregate([
-            {'$match': {'organization.title': {'$nin': ['',None]},
+        match_dict =  {
+                'organization.title': {'$nin': ['',None]},
                 'catalogue_url': {'$nin': ['', None]},
-                'is_duplicate':{'$ne':True},
                 'extras.unpublished':{'$ne':"true"},
-                }},
+                'is_duplicate':{'$ne':True}
+                }
+
+        if 'include_dupls' in args:
+            dupl_val = args['include_dupls'][0]
+            if dupl_val.lower() in ['true','1']:
+                del match_dict['is_duplicate']
+
+        result=conn[db][collection].aggregate([
+            {'$match': match_dict},
             { '$group': { '_id': '$catalogue_url', 'unique_org_size': {'$addToSet': '$organization.title' }}},
             { '$unwind':"$unique_org_size" },
             { '$group' : {'_id' : "$_id", 'count' : {'$sum' : 1} } },
@@ -2268,7 +2460,7 @@ class Metrics:
     ## returns the number of datasets with Open License
     ## (list from http://opendefinition.org/licenses)
     def GetNumberOfDatasetsWithOpenLicense(self, conn, args, version = None, db = None, collection = None):
-        open_licenses = def_formatLists.ODM_Licenses().get_open_licenses()
+        open_licenses = [x.upper() for x in def_formatLists.ODM_Licenses().get_open_licenses()]
 
         tmp_collection='tmp_coll_openlic'
 
@@ -2278,12 +2470,19 @@ class Metrics:
 
         start_time=time.time()
 
-        result=conn[db][collection].aggregate([
-            {'$match': {'catalogue_url': {'$nin': ['', None]},
-                'license_id': {'$nin': ['',None]},
-                'is_duplicate':{'$ne':True},
+        match_dict =  {'catalogue_url': {'$nin': ['', None]},
                 'extras.unpublished':{'$ne':"true"},
-                }},
+                'license_id': {'$nin': ['',None]},
+                'is_duplicate':{'$ne':True}
+                }
+
+        if 'include_dupls' in args:
+            dupl_val = args['include_dupls'][0]
+            if dupl_val.lower() in ['true','1']:
+                del match_dict['is_duplicate']
+
+        result=conn[db][collection].aggregate([
+            {'$match': match_dict},
             {'$unwind': '$resources'},
             { '$group': {'_id': '$catalogue_url', 'licenses': {'$push': '$license_id' },'freq' : {'$sum' : 1}}},
             { '$sort': { 'freq': -1 } },
@@ -2304,17 +2503,21 @@ class Metrics:
                     # for j in range(0,len(result['result'][i]['licenses'])):
                     for j in range(0,len(res['licenses'])):
                         # db_lic=result['result'][i]['licenses'][j]
-                        db_lic=res['licenses'][j]
+                        db_lic=res['licenses'][j].upper()
+                        original_lic = db_lic
                         for comb in combined_version:
-                            if db_lic.startswith(comb):
-                                db_lic = comb
-                                break
+                            if db_lic.startswith(comb) and len(db_lic) != len(comb):
+                                del_diff,add_diff = odm_comp(comb,db_lic)
+                                if len(del_diff) == 0 and (len(add_diff) >= 4 and add_diff[1]['char'].isdigit() and add_diff[3]['char'].isdigit()):
+                                    db_lic = comb
+                                    break
                         for open_lic in open_licenses:
                             if open_lic==db_lic:
-                                if db_lic in dict_licenses:
-                                    dict_licenses[db_lic]+=1
+                                if original_lic in dict_licenses:
+                                    dict_licenses[original_lic]+=1
                                 else:
-                                    dict_licenses[db_lic]=1
+                                    dict_licenses[original_lic]=1
+
                                 counter+=1
                                 break
                         tot_counter+=1
@@ -2374,18 +2577,24 @@ class Metrics:
 
 
     def GetEDOpenLicenseFreq(self, conn, args, version = None, db = None, collection = None):
-        open_licenses = def_formatLists.ODM_Licenses().get_open_licenses()
+        open_licenses = [x.upper() for x in def_formatLists.ODM_Licenses().get_open_licenses()]
 
         combined_version = [u'CC BY-SA',u'CC BY',u'CC0',u'GNU GPL']
 
         start_time=time.time()
 
-        results=conn[db][collection].find(
-            {'catalogue_url': {'$nin': ['', None]},
-                'license_id': {'$nin': ['',None]},
-                'is_duplicate':{'$ne':True},
+        match_dict =  {'catalogue_url': {'$nin': ['', None]},
                 'extras.unpublished':{'$ne':"true"},
-                },
+                'is_duplicate':{'$ne':True}
+                }
+
+        if 'include_dupls' in args:
+            dupl_val = args['include_dupls'][0]
+            if dupl_val.lower() in ['true','1']:
+                del match_dict['is_duplicate']
+
+        results=conn[db][collection].find(
+                match_dict,
             # {'$unwind': '$resources'},
             # { '$group': {'_id': 0, 'licenses': {'$push': '$license_id' },'freq' : {'$sum' : 1}}},
             {'_id':0,'license_id':1,'resources.url':1,'num_resources':1,
@@ -2400,22 +2609,28 @@ class Metrics:
             dict_licenses={}
             for result in results:
                 # if 'num_resources' in result and 'resources' in result and 'license_id' in result:
-                if 'resources' in result and 'license_id' in result:
-                    db_lic = result['license_id']
-                    for comb in combined_version:
-                        if db_lic.startswith(comb):
-                            db_lic = comb
-                            break
-                    for open_lic in open_licenses:
-                        # distribs_size=result['num_resources']
-                        distribs_size=len(result['resources'])
-                        if open_lic==db_lic:
-                            if db_lic in dict_licenses:
-                                dict_licenses[db_lic]+=distribs_size
-                            else:
-                                dict_licenses[db_lic]=distribs_size
-                            break
-                    tot_counter+=distribs_size
+                try:
+                    if 'resources' in result and 'license_id' in result:
+                        db_lic = result['license_id'].upper()
+                        # original_lic = db_lic
+                        for comb in combined_version:
+                            if db_lic.startswith(comb) and len(db_lic) != len(comb):
+                                del_diff,add_diff = odm_comp(comb,db_lic)
+                                if len(del_diff) == 0 and (len(add_diff) >= 4 and add_diff[1]['char'].isdigit() and add_diff[3]['char'].isdigit()):
+                                    db_lic = comb
+                                    break
+                        for open_lic in open_licenses:
+                            # distribs_size=result['num_resources']
+                            distribs_size=len(result['resources'])
+                            if open_lic==db_lic:
+                                if db_lic in dict_licenses:
+                                    dict_licenses[db_lic]+=distribs_size
+                                else:
+                                    dict_licenses[db_lic]=distribs_size
+                                break
+                        tot_counter+=distribs_size
+                except AttributeError,e:
+                    print(e)
 
 
             sorted_licenses=OrderedDict()
@@ -2435,7 +2650,7 @@ class Metrics:
 
 
     def GetCDOpenLicenseFreq(self, conn, args, version = None, db = None, collection = None):
-        open_licenses = def_formatLists.ODM_Licenses().get_open_licenses()
+        open_licenses = [x.upper() for x in def_formatLists.ODM_Licenses().get_open_licenses()]
 
         start_time=time.time()
 
@@ -2460,7 +2675,7 @@ class Metrics:
                 tot_counter=0
                 dict_licenses={}
                 for j in range(0,len(result['result'][i]['licenses'])):
-                    db_lic=result['result'][i]['licenses'][j]
+                    db_lic=result['result'][i]['licenses'][j].upper()
                     for comb in combined_version:
                         if db_lic.startswith(comb):
                             db_lic = comb
@@ -2487,7 +2702,7 @@ class Metrics:
 
     ## returns the proportion of datasets with Open License (list from http://opendefinition.org/licenses)
     def GetProportionOfDatasetsWithOpenLicense(self, conn, args, version = None, db = None, collection = None):
-        open_licenses = def_formatLists.ODM_Licenses().get_open_licenses()
+        open_licenses = [x.upper() for x in def_formatLists.ODM_Licenses().get_open_licenses()]
 
         # pipeline_args = {'group': '$license_title'}
         # document=self._aggregate(conn, args, pipeline_args, version, 'odm', 'odm', False)
@@ -2525,7 +2740,7 @@ class Metrics:
             for i in range(0,len(result['result'])):
                 dict_licenses={}
                 for j in range(0,len(result['result'][i]['licenses'])):
-                    key=result['result'][i]['licenses'][j]
+                    key=result['result'][i]['licenses'][j].upper()
                     if key not in ['',None]:
                         if key in dict_licenses:
                             dict_licenses[key]+=1
@@ -2573,7 +2788,7 @@ class Metrics:
 
 
     def GetOpenLicenseFreqPerDate(self, conn, args, version = None, db = None, collection = None):
-        open_licenses = def_formatLists.ODM_Licenses().get_open_licenses()
+        open_licenses = [x.upper() for x in def_formatLists.ODM_Licenses().get_open_licenses()]
 
         start_time=time.time()
 
@@ -2612,7 +2827,7 @@ class Metrics:
             for i in range(0,len(result['result'])):
                 dict_licenses={}
                 for j in range(0,len(result['result'][i]['licenses'])):
-                    key=result['result'][i]['licenses'][j]['lic']
+                    key=result['result'][i]['licenses'][j]['lic'].upper()
 
                     lic_dt=result['result'][i]['licenses'][j]['date']
                     roundup_lic_dt=date(lic_dt.year,
@@ -2815,11 +3030,18 @@ class Metrics:
 
         start_time=time.time()
 
-        result=conn[db][collection].aggregate([
-            {'$match': {'catalogue_url': {'$nin': ['', None]},
-                'is_duplicate':{'$ne':True},
+        match_dict =  {'catalogue_url': {'$nin': ['', None]},
                 'extras.unpublished':{'$ne':"true"},
-                }},
+                'is_duplicate':{'$ne':True}
+                }
+
+        if 'include_dupls' in args:
+            dupl_val = args['include_dupls'][0]
+            if dupl_val.lower() in ['true','1']:
+                del match_dict['is_duplicate']
+
+        result=conn[db][collection].aggregate([
+            {'$match': match_dict},
             {'$unwind':'$resources'},
             { '$group': { '_id': 0, 'resources': {'$push': '$resources.format' },'counter' : {'$sum' : 1}}},
             # { '$sort': { 'counter': -1 } },
@@ -2871,11 +3093,18 @@ class Metrics:
 
         start_time=time.time()
 
-        result=conn[db][collection].aggregate([
-            {'$match': {'catalogue_url': {'$nin': ['', None]},
-                'is_duplicate':{'$ne':True},
+        match_dict =  {'catalogue_url': {'$nin': ['', None]},
                 'extras.unpublished':{'$ne':"true"},
-                }},
+                'is_duplicate':{'$ne':True}
+                }
+
+        if 'include_dupls' in args:
+            dupl_val = args['include_dupls'][0]
+            if dupl_val.lower() in ['true','1']:
+                del match_dict['is_duplicate']
+
+        result=conn[db][collection].aggregate([
+            {'$match': match_dict},
             {'$unwind':'$resources'},
             { '$group': { '_id': '$catalogue_url', 'resources': {'$push': '$resources.format' },'count' : {'$sum' : 1}}},
             { '$sort': { 'count': -1 } },
@@ -3220,11 +3449,18 @@ class Metrics:
 
 
     def GetCatDistribsTotFreq(self, conn, args, version = None, db = None, collection = None, limit= True):
-        result=conn[db][collection].aggregate([
-            {'$match': {'catalogue_url': {'$nin': ['', None]},
-                'is_duplicate':{'$ne':True},
+        match_dict =  {'catalogue_url': {'$nin': ['', None]},
                 'extras.unpublished':{'$ne':"true"},
-                }},
+                'is_duplicate':{'$ne':True}
+                }
+
+        if 'include_dupls' in args:
+            dupl_val = args['include_dupls'][0]
+            if dupl_val.lower() in ['true','1']:
+                del match_dict['is_duplicate']
+
+        result=conn[db][collection].aggregate([
+            {'$match': match_dict},
             {'$match': {'resources':{'$exists':True}}},
             { '$group': {'_id' : '$catalogue_url', 'count': {'$sum': {'$size': '$resources'}}}},
             {'$sort':{'count':-1}},
@@ -3264,11 +3500,18 @@ class Metrics:
 
 
     def GetCatDataSizeTotal(self, conn, args, version = None, db = None, collection = None):
-        result=conn[db][collection].aggregate([
-            {'$match': {'catalogue_url': {'$nin': ['', None]},
-                'is_duplicate':{'$ne':True},
+        match_dict =  {'catalogue_url': {'$nin': ['', None]},
                 'extras.unpublished':{'$ne':"true"},
-                }},
+                'is_duplicate':{'$ne':True}
+                }
+
+        if 'include_dupls' in args:
+            dupl_val = args['include_dupls'][0]
+            if dupl_val.lower() in ['true','1']:
+                del match_dict['is_duplicate']
+
+        result=conn[db][collection].aggregate([
+            {'$match': match_dict},
             # {'$match': {'resources.0': {'$exists': True}}},
             {'$unwind': "$resources" },
             # {'$match': {'resources.size':{'$nin':['',None]}}},
@@ -3281,11 +3524,18 @@ class Metrics:
 
 
     def GetEDDistribSize(self, conn, args, version = None, db = None, collection = None):
-        result=conn[db][collection].aggregate([
-            {'$match': {'catalogue_url': {'$nin': ['', None]},
-                'is_duplicate':{'$ne':True},
+        match_dict =  {'catalogue_url': {'$nin': ['', None]},
                 'extras.unpublished':{'$ne':"true"},
-                }},
+                'is_duplicate':{'$ne':True}
+                }
+
+        if 'include_dupls' in args:
+            dupl_val = args['include_dupls'][0]
+            if dupl_val.lower() in ['true','1']:
+                del match_dict['is_duplicate']
+
+        result=conn[db][collection].aggregate([
+            {'$match': match_dict},
             {'$unwind': "$resources" },
             { '$group': {'_id' : 0, 'size': {'$sum': '$resources.size'}, 'freq': {'$sum': 1}}},
             {'$sort': {'freq': -1}},
@@ -3435,12 +3685,21 @@ class Metrics:
 
         start_time=time.time()
 
-        result=conn[db][collection].find({'catalogue_url': {'$nin': ['', None]},
-                        'is_duplicate':{'$ne':True},
-                        'extras.unpublished':{'$ne':"true"},
-                        },
-                        {'_id':0,'catalogue_url':1,'resources.format':1},
-                        )
+        match_dict =  {'catalogue_url': {'$nin': ['', None]},
+                'extras.unpublished':{'$ne':"true"},
+                'is_duplicate':{'$ne':True}
+                }
+
+        if 'include_dupls' in args:
+            dupl_val = args['include_dupls'][0]
+            if dupl_val.lower() in ['true','1']:
+                del match_dict['is_duplicate']
+
+        result=conn[db][collection].find(
+                match_dict
+            ,
+            {'_id':0,'catalogue_url':1,'resources.format':1},
+            )
         # aggregate([
         #     {'$match': {'catalogue_url': {'$nin': ['', None]},
         #         'is_duplicate':{'$ne':True},
@@ -3453,7 +3712,6 @@ class Metrics:
 
         total_freqs=[]
         if result.count()>0:
-
             country_format_freq={}
             tot_counter={}
             for _dd in result:
@@ -3465,12 +3723,15 @@ class Metrics:
                 if resource_size>0:
                     for  _res in _dd['resources']:
                         try:
-                            if str(_res['format'].encode('utf-8')).lower() in machine_readable:
+                            if 'format' in _res and \
+                                    str(_res['format']).lower() in machine_readable:
                                 # format_freq[str(result['result'][i]['resources'][j]).upper()]+=1
                                 format_freq=1
                                 break
                         except AttributeError,e:
                             print(e)
+                        except KeyError,e:
+                            print(e,_dd['_id'])
 
                 country_name=_dd['catalogue_url']
                 if country_name in country_format_freq:
@@ -3485,32 +3746,10 @@ class Metrics:
                 total_freqs.append({'_id':cn,'count': country_format_freq[cn],
                     'tot_count':tot_counter[cn]})
 
-            # # machine_readable=['CSV', 'TSV', 'JSON', 'XML', 'RDF']
-            # result=conn[db][collection].aggregate([
-            #     # { '$match': { 'resources.0': { '$exists': True } } },
-            #     { '$match': { 'catalogue_url': { '$nin': ['', None] }}},
-            #     { '$unwind': "$resources" },
-            #     # { '$match': { 'resources.format': { '$in': [ 'CSV', 'TSV', 'JSON', 'XML', 'RDF' ] } }} ,
-            #     { '$group': { '_id': "$catalogue_url", 'resources': {'$push': '$resources.format'}, 'counter': { '$sum': 1 } } },
-            #     { '$sort': { 'counter': -1 } },
-            #     # {'$limit': 10}
-            #     ])
-            #
-            # total_freqs=[]
-            # if result['ok']==1:
-            #     for i in range(0,len(result['result'])):
-            #         format_freq={'CSV':0, 'TSV':0, 'JSON':0, 'XML':0, 'RDF':0}
-            #         for j in range(0,len(result['result'][i]['resources'])):
-            #             if str(result['result'][i]['resources'][j].encode('utf-8')).upper() in format_freq:
-            #                 format_freq[str(result['result'][i]['resources'][j]).upper()]+=1
-            #
-            #         total_freqs.append({'_id': result['result'][i]['_id'], 'formats': format_freq})
-
             print (time.time() - start_time)
             return {'ok':1, 'result': total_freqs}
         else:
             return result
-
 
 
     def GetEDMachineReadFormatFreq(self, conn, args, version = None, db = None, collection = None):
@@ -3518,12 +3757,20 @@ class Metrics:
 
         start_time=time.time()
 
-        result=conn[db][collection].find(
-            {'catalogue_url': {'$nin': ['', None]},
-                'is_duplicate':{'$ne':True},
+        match_dict =  {'catalogue_url': {'$nin': ['', None]},
                 'extras.unpublished':{'$ne':"true"},
-                },
-            {'_id':0,'catalogue_url':1,'resources.format':1},
+                'is_duplicate':{'$ne':True}
+                }
+
+        if 'include_dupls' in args:
+            dupl_val = args['include_dupls'][0]
+            if dupl_val.lower() in ['true','1']:
+                del match_dict['is_duplicate']
+
+        result=conn[db][collection].find(
+                match_dict,
+            {
+                '_id':0,'resources.format':1},
             )
 
         total_freqs=[]
@@ -3538,7 +3785,8 @@ class Metrics:
                 if resource_size>0:
                     for  _res in _dd['resources']:
                         try:
-                            if str(_res['format'].encode('utf-8')).lower() in machine_readable:
+                            if 'format' in _res and \
+                                    str(_res['format']).lower() in machine_readable:
                                 format_freq+=1
                                 break
                         except AttributeError,e:
@@ -4005,19 +4253,26 @@ class Metrics:
     def Getcategories(self, conn, args, version = None, db = None, collection = None):
         # EXCLUDE_COUNTRIES=re.compile('\.eu|datahub\.io')
         try:
-            result=conn[db][collection].aggregate([
-                {'$match': {'catalogue_url': {'$nin': ['', None]},
-                    'is_duplicate':{'$ne':True},
+            match_dict =  {'catalogue_url': {'$nin': ['', None]},
                     'extras.unpublished':{'$ne':"true"},
                     # 'catalogue_url':{'$not':EXCLUDE_COUNTRIES}}
                     'catalogue_url':{'$nin':[
-                        'https://www.dati.lombardia.it'
+                        # 'https://www.dati.lombardia.it'
                         # ,'https://opendata.bristol.gov.uk'
-                        ,'https://gavaobert.gavaciutat.cat'
+                        # ,'https://gavaobert.gavaciutat.cat'
                         # ,'http://portal.openbelgium.be/'
-                        ,'https://data.eindhoven.nl'
-                    ]}
-                }},
+                        # ,'https://data.eindhoven.nl'
+                    ]},
+                    'is_duplicate':{'$ne':True}
+                    }
+
+            if 'include_dupls' in args:
+                dupl_val = args['include_dupls'][0]
+                if dupl_val.lower() in ['true','1']:
+                    del match_dict['is_duplicate']
+
+            result=conn[db][collection].aggregate([
+                {'$match': match_dict},
                 {'$unwind':'$category' },
                 {'$group':{'_id':'$catalogue_url', 'themes':{'$push':'$category'},'count':{'$sum':1}}},
                 {'$sort':{'count':-1}}
@@ -4377,8 +4632,8 @@ class Metrics:
             {'$group': {'_id':'$catalogue_url',
                 'freq': {'$sum': { '$cond': [ {'$or':[{ '$ne': [ "$is_duplicate", True] },
                     ]} , 1, 0 ] }},
-                'counter': {'$sum': 1}}},
-            {'$sort':{'counter':-1}},
+                'tot_counter': {'$sum': 1}}},
+            {'$sort':{'tot_counter':-1}},
         ])
         # result=conn[db][collection].aggregate([
         #     {'$unwind':'$resources'},
@@ -4415,8 +4670,8 @@ class Metrics:
             #     del result['result'][i]
                 result['result'][metadata]['prop']=(
                     (result['result'][metadata]['freq'])*100.00) \
-                    /result['result'][metadata]['counter']
-                del result['result'][metadata]['counter']
+                    /result['result'][metadata]['tot_counter']
+                # del result['result'][metadata]['counter']
 
             return {'ok':1,'result':result['result']}
         else:
@@ -4609,12 +4864,18 @@ class Metrics:
     def GetEDCoreMetadataFreq(self, conn, args, version = None, db = None, collection = None):
         start_time=time.time()
 
-        result=conn[db][collection].find(
-            # {'$match': {'catalogue_url': {'$nin': ['', None]},
-            {'catalogue_url': {'$nin': ['', None]},
-                'is_duplicate':{'$ne':True},
+        match_dict =  {'catalogue_url': {'$nin': ['', None]},
                 'extras.unpublished':{'$ne':"true"},
-                },
+                'is_duplicate':{'$ne':True}
+                }
+
+        if 'include_dupls' in args:
+            dupl_val = args['include_dupls'][0]
+            if dupl_val.lower() in ['true','1']:
+                del match_dict['is_duplicate']
+
+        result=conn[db][collection].find(
+                match_dict,
             {'_id':0,'license_id':1,'author':1,'maintainer':1,
                 'extras.date_released':1,'extras.date_updated':1,
                 # 'catalogue_url':1,
@@ -4676,12 +4937,18 @@ class Metrics:
     def GetCatCoreMetadataFreq(self, conn, args, version = None, db = None, collection = None):
         start_time=time.time()
 
-        result=conn[db][collection].find(
-            # {'$match': {'catalogue_url': {'$nin': ['', None]},
-            {'catalogue_url': {'$nin': ['', None]},
-                'is_duplicate':{'$ne':True},
+        match_dict =  {'catalogue_url': {'$nin': ['', None]},
                 'extras.unpublished':{'$ne':"true"},
-                },
+                'is_duplicate':{'$ne':True}
+                }
+
+        if 'include_dupls' in args:
+            dupl_val = args['include_dupls'][0]
+            if dupl_val.lower() in ['true','1']:
+                del match_dict['is_duplicate']
+
+        result=conn[db][collection].find(
+                match_dict,
             {'_id':0,'license_id':1,'author':1,'maintainer':1,
                 'extras.date_released':1,'extras.date_updated':1,
                 'catalogue_url':1,
@@ -4761,18 +5028,27 @@ class Metrics:
     def GetCatAccessabilityFreq(self, conn, args, version = None, db = None, collection = None):
         start_time=time.time()
 
-        result=conn[db][collection].find(
-            # {'$match': {'catalogue_url': {'$nin': ['', None]},
-            {'catalogue_url': {'$nin': ['', None]},
-                'is_duplicate':{'$ne':True},
+        match_dict =  {'catalogue_url': {'$nin': ['', None]},
                 'extras.unpublished':{'$ne':"true"},
-                },
-            {'_id':0,'author_email':1,'maintainer_email':1,
+                'is_duplicate':{'$ne':True}
+                }
+
+        if 'include_dupls' in args:
+            dupl_val = args['include_dupls'][0]
+            if dupl_val.lower() in ['true','1']:
+                del match_dict['is_duplicate']
+
+        result=conn[db][collection].find(
+                match_dict,
+            {'_id':0,
+                # 'author_email':1,'maintainer_email':1,
+                'author':1,'organization.title':1,
                 'catalogue_url':1,'resources.status_code':1,
                 'notes':1
                 }
             )
 
+        # print(result)
         if result.count()>0:
             result.batch_size(MongoHandler.batchSize)
 
@@ -4780,26 +5056,23 @@ class Metrics:
             tot_count={}
             accessible_count={}
             for dd in result:
-                if dd['catalogue_url'] in tot_count:
-                    tot_count[dd['catalogue_url']]+=1
-                else:
-                    tot_count[dd['catalogue_url']]=1
+                if 'resources' in dd and len(dd['resources']) > 0:
+                    if dd['catalogue_url'] in tot_count:
+                        tot_count[dd['catalogue_url']]+=1
+                    else:
+                        tot_count[dd['catalogue_url']]=1
 
-                if 'resources' in dd:
-                    not_broken=True
+                    not_broken=False
                     for res in dd['resources']:
-                        if 'status_code' in res:
-                            if res['status_code']>=400:
-                                not_broken=False
-                            else:
-                                not_broken=True
-                                break
-                        else:
-                            not_broken=False
+                        if 'status_code' in res and res['status_code'] < 400:
+                            not_broken=True
+                            break
 
                     if ( not_broken
-                            and ('author_email' in dd and dd['author_email']
-                                or ('maintainer_email' in dd and dd['maintainer_email'] not in ['',None]) )
+                            and (
+                                ('author' in dd and dd['author'])
+                                or ('organization' in dd and 'title' in dd['organization'] and dd['organization']['title'] not in ['',None])
+                                )
                             and ('notes' in dd and dd['notes'])
                     ):
                         if dd['catalogue_url'] in accessible_count:
@@ -4807,7 +5080,7 @@ class Metrics:
                         else:
                             accessible_count[dd['catalogue_url']]=1
 
-            # print(tot_count)
+            # # print(tot_count)
             for i in tot_count:
                 if i in accessible_count:
                     total.append({'_id':i,'count': accessible_count[i],
@@ -4828,9 +5101,10 @@ class Metrics:
             {'$project':
                 {'_id':0,'title':1,'description':1,'url':'$cat_url',
                     'source_type':'$type','language':1,'country':1,
-                    'date_created':'$catalogue_date_created','date_updated':'$catalogue_date_updated',
+                    # 'date_created':'$catalogue_date_created','date_updated':'$catalogue_date_updated',
                     'update_frequency':'$frequency',
-                    'date_harvested':1,'date_reharvested':1,'official':{'$ifNull':['$official','U']},
+                    'date_harvested':1,'date_updated':'$date_reharvested',
+                    'official':{'$ifNull':['$official','U']},
                     'is_harmonized':{'$ifNull':['$available',False]},
                     }}
             ])
