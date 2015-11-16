@@ -100,7 +100,7 @@ class ODM_Licenses:
              u'Free Art License',u'FAL',
              u'GFDL',u'GNU FDL',
              u'GNU GPL-2.0',u'GNU GPL-3.0',
-             u'OGL',u'OGL-UK-2.0',u'OGL-UK-3.0',u'SOGL',u'FOGL',
+             u'OGL',u'OGL-UK-2.0',u'OGL-UK-3.0',u'SOGL',
              u'Open Government Licence - Canada 2.0',u'Open Government Licence Canada 2.0',
              u'OGL-Canada-2.0',
              u'MirOS License',

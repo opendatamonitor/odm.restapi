@@ -392,7 +392,7 @@ class MongoHandler:
                         params.append({extras_date:{'$gte':start_date}})
                     else:
                         params.append({extras_date:{'$lte':end_date}})
-                criteria['$and']=params
+                    criteria['$and']=params
 
         cursor = conn[db][collection].find(spec=criteria, fields=fields, limit=limit, skip=skip)
 
@@ -502,37 +502,37 @@ class MongoHandler:
         if 'catalogue_url' in args:
             criteria['catalogue_url']=args['catalogue_url'][0]
 
-        if 'attribute' in args:
-            if args['attribute'][0] in ['date_released','date_updated','metadata_created','metadata_modified']:
-                # end_date=datetime.now()
-                end_date=''
-                start_date=''
-                if "end_date" in args:
-                    try:
-                        end_date=datetime.strptime(args['end_date'][0], '%Y-%m-%d')
-                    except ValueError as e:
-                        print (e)
-
-                # start_date=end_date + relativedelta(years=-1)
-                if "start_date" in args:
-                    try:
-                        start_date=datetime.strptime(args['start_date'][0], '%Y-%m-%d')
-                    except ValueError as e:
-                        print (e)
-                if start_date or end_date:
-                    if 'metadata' in args['attribute'][0]:
-                        extras_date=args['attribute'][0]
-                    else:
-                        extras_date='extras.'+args['attribute'][0]
-                    params=[]
-                    params.append({extras_date:{'$type':9}})
-                    if start_date and end_date:
-                        params.append({extras_date:{'$gte':start_date,'$lte':end_date}})
-                    elif  start_date:
-                        params.append({extras_date:{'$gte':start_date}})
-                    else:
-                        params.append({extras_date:{'$lte':end_date}})
-                criteria['$and']=params
+        # if 'attribute' in args:
+        #     if args['attribute'][0] in ['date_released','date_updated','metadata_created','metadata_updated']:
+        #         # end_date=datetime.now()
+        #         end_date=''
+        #         start_date=''
+        #         if "end_date" in args:
+        #             try:
+        #                 end_date=datetime.strptime(args['end_date'][0], '%Y-%m-%d')
+        #             except ValueError as e:
+        #                 print (e)
+        #
+        #         # start_date=end_date + relativedelta(years=-1)
+        #         if "start_date" in args:
+        #             try:
+        #                 start_date=datetime.strptime(args['start_date'][0], '%Y-%m-%d')
+        #             except ValueError as e:
+        #                 print (e)
+        #         if start_date or end_date:
+        #             if 'metadata' in args['attribute'][0]:
+        #                 extras_date=args['attribute'][0]
+        #             else:
+        #                 extras_date='extras.'+args['attribute'][0]
+        #             params=[]
+        #             params.append({extras_date:{'$type':9}})
+        #             if start_date and end_date:
+        #                 params.append({extras_date:{'$gte':start_date,'$lte':end_date}})
+        #             elif  start_date:
+        #                 params.append({extras_date:{'$gte':start_date}})
+        #             else:
+        #                 params.append({extras_date:{'$lte':end_date}})
+        #         criteria['$and']=params
 
         cursor = conn[db][collection].find(spec=criteria, fields=fields, limit=limit, skip=skip)
 
