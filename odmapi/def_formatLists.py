@@ -93,9 +93,9 @@ class ODM_Licenses:
         open_licenses=[
              u'CC0',
              u'ODC-PDDL',u'Open Data Commons Public Domain Dedication and Licence',u'PDDL',
-             u'CC BY',
+             u'CC BY', u'CC-BY',
              u'ODC-BY',
-             u'CC BY-SA',
+             u'CC BY-SA', u'CC-BY-SA', 
              u'ODC-ODbL',u'ODbL',
              u'Free Art License',u'FAL',
              u'GFDL',u'GNU FDL',
@@ -109,7 +109,8 @@ class ODM_Licenses:
              u'DL-DE-BY-2.0',u'Data licence Germany – attribution – version 2.0',u'Data licence Germany – Zero – version 2.0',
              u'Design Science License',u'EFF Open Audio License',
              u'SPL',
-             u'W3C license'
+             u'W3C license',
+             u'Licence-Ouverte', u'FR-LO'
          ]
 
         return open_licenses
